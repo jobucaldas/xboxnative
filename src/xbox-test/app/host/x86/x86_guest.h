@@ -3400,14 +3400,13 @@ inline void Guest::register_all() {
         static const uint8_t iid_unknown[]={0,0,0,0,0,0,0,0,0xc0,0,0,0,0,0,0,0x46};
         static const uint8_t iid_sound[]={0x83,0xfa,0x9a,0x27,0x81,0x49,0xce,0x11,0xa5,0x21,0,0x20,0xaf,0x0b,0xe5,0x60};
         static const uint8_t iid_sound8[]={0x93,0x7e,0x0a,0xc5,0x95,0xf3,0x34,0x48,0x9e,0xf6,0x7f,0xa9,0x9d,0xe5,0x09,0x66};
-        if(!c.arg(4)||!c.arg(3)||!c.arg(0)){set_last_error(87);return 0x80004003u;}mem.w32(c.arg(4),0);if(c.arg(1))return 0x80040110u;
+        if(!c.arg(4)||!c.arg(3)||!c.arg(0)){if(c.arg(4))mem.w32(c.arg(4),0);set_last_error(87);return 0x80004003u;}mem.w32(c.arg(4),0);if(c.arg(1))return 0x80040110u;
         uint8_t clsid[16],iid[16];if(!guid_read(c.arg(0),clsid)||!guid_read(c.arg(3),iid))return 0x80004003u;
         if(!guid_equal(clsid,clsid_sound8)&&!guid_equal(clsid,clsid_sound))return 0x80040154u;
         if(!guid_equal(iid,iid_unknown)&&!guid_equal(iid,iid_sound)&&!guid_equal(iid,iid_sound8))return 0x80004002u;
 #if defined(_WIN32)
-        if(!host.dsound_factory)return 0x80004001u;uintptr_t result=0;uint32_t hr=uint32_t(host.dsound_factory(nullptr,&result));
-        if((hr&0x80000000u)||!result)return (hr&0x80000000u)?hr:0x80004001u;
-        uint32_t guest=dsound_wrap(host.com,c,"IDirectSound8",reinterpret_cast<IUnknown*>(result));if(!guest)return 0x80004001u;c.mem.w32(c.arg(4),guest);return hr;
+        if(!host.dsound_factory)return 0x80004001u;
+        uint32_t guest=dsound_wrap_device(host.com,c,host,nullptr);if(!guest)return 0x80004001u;c.mem.w32(c.arg(4),guest);return 0;
 #else
         return 0x80004001u;
 #endif

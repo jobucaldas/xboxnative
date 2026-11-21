@@ -3,6 +3,7 @@
 #pragma once
 #include <cstring>
 #include <map>
+#include <memory>
 #include <vector>
 #include "x86_d3d9.h"
 #if defined(_WIN32)
@@ -28,11 +29,31 @@ inline constexpr GUID notify{0xB0210783,0x89CD,0x11D0,{0xAF,0x08,0x00,0xA0,0xC9,
 inline constexpr uint32_t DS_E_POINTER=0x80004003u;
 inline constexpr uint32_t DS_E_NOINTERFACE=0x80004002u;
 inline constexpr uint32_t DSERR_NODRIVER_X86=0x88780078u;
+inline constexpr uint32_t DSERR_ALREADYINITIALIZED_X86=0x88780082u;
+inline constexpr uint32_t DSERR_UNINITIALIZED_X86=0x887800AAu;
+
+// Per-proxy DirectSound device holder. Objects created via CoCreateInstance start
+// with inner == nullptr and bind the host IDirectSound8 on Initialize(); objects
+// created via DirectSoundCreate/DirectSoundCreate8 start already bound.
+struct DSoundDevice {
+    Host* host=nullptr;
+    IDirectSound8* inner=nullptr;
+    ~DSoundDevice() { if(inner){inner->Release();inner=nullptr;} }
+};
 
 inline uint32_t dsound_wrap(ComSpace& space,Cpu& cpu,const char* iface,IUnknown* object) {
     if(!object)return 0;
     uint32_t guest=space.create(cpu,iface,object,[object](){object->AddRef();},[object](){object->Release();});
     object->Release();
+    return guest;
+}
+inline uint32_t dsound_wrap_device(ComSpace& space,Cpu& cpu,Host& host,IDirectSound8* inner) {
+    auto state=std::make_unique<DSoundDevice>();
+    state->host=&host;
+    state->inner=inner;
+    DSoundDevice* raw=state.get();
+    uint32_t guest=space.create(cpu,"IDirectSound8",raw,[](){},[raw](){delete raw;});
+    state.release();
     return guest;
 }
 inline uint32_t dsound_guid(Cpu& cpu,uint32_t address,GUID& value) {
@@ -42,10 +63,22 @@ inline uint32_t dsound_guid(Cpu& cpu,uint32_t address,GUID& value) {
 inline HRESULT dsound_qi(Proxy& proxy,Cpu& cpu) {
     const uint32_t iid_address=cpu.arg(1),out=cpu.arg(2);if(!out)return E_POINTER;cpu.mem.w32(out,0);
     GUID iid{};if(!dsound_guid(cpu,iid_address,iid))return E_POINTER;
+    if(strcmp(proxy.iface,"IDirectSound8")==0) {
+        auto* state=static_cast<DSoundDevice*>(proxy.host);
+        if(!IsEqualIID(iid,dsound_iid::unknown)&&!IsEqualIID(iid,dsound_iid::sound)&&!IsEqualIID(iid,dsound_iid::sound8))return E_NOINTERFACE;
+        if(state->inner) {
+            void* result=nullptr;
+            HRESULT hr=state->inner->QueryInterface(iid,&result);
+            if(FAILED(hr))return hr;
+            if(result)static_cast<IUnknown*>(result)->Release();
+        }
+        ++proxy.guest_refs;
+        cpu.mem.w32(out,proxy.guest);
+        return S_OK;
+    }
     void* result=nullptr;HRESULT hr=static_cast<IUnknown*>(proxy.host)->QueryInterface(iid,&result);if(FAILED(hr))return hr;
     const char* iface=nullptr;
     if(IsEqualIID(iid,dsound_iid::unknown))iface=strcmp(proxy.iface,"IDirectSoundNotify")==0?"IDirectSoundBuffer8":proxy.iface;
-    else if(IsEqualIID(iid,dsound_iid::sound8)||IsEqualIID(iid,dsound_iid::sound))iface="IDirectSound8";
     else if(IsEqualIID(iid,dsound_iid::buffer8)||IsEqualIID(iid,dsound_iid::buffer))iface="IDirectSoundBuffer8";
     else if(IsEqualIID(iid,dsound_iid::notify))iface="IDirectSoundNotify";
     if(!iface){static_cast<IUnknown*>(result)->Release();return E_NOINTERFACE;}
@@ -57,24 +90,35 @@ inline void register_dsound_com(ComSpace& s,Host& h) {
     s.interface_("IDirectSound8",12);s.interface_("IDirectSoundBuffer8",24);s.interface_("IDirectSoundNotify",4);
     auto method=[&](const char* iface,unsigned slot,unsigned argc,Marshaller fn){s.method(iface,slot,argc,std::move(fn));};
     for(const char* iface:{"IDirectSound8","IDirectSoundBuffer8","IDirectSoundNotify"})method(iface,0,3,[](Proxy& p,Cpu& c){return uint32_t(dsound_qi(p,c));});
-    auto device=[](Proxy& p){return static_cast<IDirectSound8*>(p.host);};
+    auto device_state=[](Proxy& p){return static_cast<DSoundDevice*>(p.host);};
+    auto device=[](Proxy& p)->IDirectSound8*{return static_cast<DSoundDevice*>(p.host)->inner;};
     auto buffer=[](Proxy& p){return static_cast<IDirectSoundBuffer8*>(p.host);};
     method("IDirectSound8",3,4,[&s,device](Proxy& p,Cpu& c)->uint32_t {
-        if(!c.arg(2))return E_POINTER;uint32_t out=c.arg(2);c.mem.w32(out,0);if(c.arg(3))return DSERR_NOAGGREGATION;DSBUFFERDESC desc{};desc.dwSize=sizeof(desc);
+        uint32_t out=c.arg(2);if(out)c.mem.w32(out,0);
+        IDirectSound8* dev=device(p);if(!dev)return DSERR_UNINITIALIZED_X86;
+        if(!out)return E_POINTER;if(c.arg(3))return DSERR_NOAGGREGATION;DSBUFFERDESC desc{};desc.dwSize=sizeof(desc);
         uint32_t addr=c.arg(1);if(!addr)return E_POINTER;if(c.mem.r32(addr)<36u)return DSERR_INVALIDPARAM;
         desc.dwFlags=c.mem.r32(addr+4);desc.dwBufferBytes=c.mem.r32(addr+8);desc.dwReserved=c.mem.r32(addr+12);
         uint32_t fmt_addr=c.mem.r32(addr+16);WAVEFORMATEX fmt{};if(fmt_addr){auto bytes=c.mem.read_bytes(fmt_addr,sizeof(fmt));memcpy(&fmt,bytes.data(),sizeof(fmt));desc.lpwfxFormat=&fmt;}
-        IDirectSoundBuffer* object=nullptr;HRESULT hr=device(p)->CreateSoundBuffer(&desc,&object,reinterpret_cast<IUnknown*>(uintptr_t(c.arg(3))));
+        IDirectSoundBuffer* object=nullptr;HRESULT hr=dev->CreateSoundBuffer(&desc,&object,reinterpret_cast<IUnknown*>(uintptr_t(c.arg(3))));
         if(SUCCEEDED(hr)&&object)c.mem.w32(out,dsound_wrap(s,c,"IDirectSoundBuffer8",reinterpret_cast<IUnknown*>(object)));return uint32_t(hr);
     });
-    method("IDirectSound8",4,2,[device](Proxy& p,Cpu& c)->uint32_t {uint32_t out=c.arg(1);if(!out)return E_POINTER;DSCAPS caps{};caps.dwSize=sizeof(caps);HRESULT hr=device(p)->GetCaps(&caps);if(SUCCEEDED(hr))c.mem.write_bytes(out,&caps,sizeof(caps));return uint32_t(hr);});
-    method("IDirectSound8",5,3,[&s,device](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(2))return E_POINTER;c.mem.w32(c.arg(2),0);uint32_t guest=c.arg(1);auto& original=p.space->by_guest(guest);IDirectSoundBuffer* duplicate=nullptr;HRESULT hr=device(p)->DuplicateSoundBuffer(static_cast<IDirectSoundBuffer*>(original.host),&duplicate);if(SUCCEEDED(hr)&&duplicate)c.mem.w32(c.arg(2),dsound_wrap(s,c,"IDirectSoundBuffer8",reinterpret_cast<IUnknown*>(duplicate)));return uint32_t(hr);});
-    method("IDirectSound8",6,3,[device](Proxy& p,Cpu& c){return uint32_t(device(p)->SetCooperativeLevel(reinterpret_cast<HWND>(uintptr_t(c.arg(1))),c.arg(2)));});
-    method("IDirectSound8",7,1,[device](Proxy& p,Cpu&){return uint32_t(device(p)->Compact());});
-    method("IDirectSound8",8,2,[device](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;DWORD config=0;HRESULT hr=device(p)->GetSpeakerConfig(&config);if(SUCCEEDED(hr))c.mem.w32(c.arg(1),config);return uint32_t(hr);});
-    method("IDirectSound8",9,2,[device](Proxy& p,Cpu& c){return uint32_t(device(p)->SetSpeakerConfig(c.arg(1)));});
-    method("IDirectSound8",10,2,[device](Proxy& p,Cpu& c)->uint32_t {GUID id{};GUID* idp=nullptr;if(c.arg(1)){auto bytes=c.mem.read_bytes(c.arg(1),sizeof(id));memcpy(&id,bytes.data(),sizeof(id));idp=&id;}return uint32_t(device(p)->Initialize(idp));});
-    method("IDirectSound8",11,2,[device](Proxy& p,Cpu& c)->uint32_t {DWORD certified=0;HRESULT hr=device(p)->VerifyCertification(&certified);if(SUCCEEDED(hr)&&c.arg(1))c.mem.w32(c.arg(1),certified);return uint32_t(hr);});
+    method("IDirectSound8",4,2,[device](Proxy& p,Cpu& c)->uint32_t {IDirectSound8* dev=device(p);if(!dev)return DSERR_UNINITIALIZED_X86;uint32_t out=c.arg(1);if(!out)return E_POINTER;DSCAPS caps{};caps.dwSize=sizeof(caps);HRESULT hr=dev->GetCaps(&caps);if(SUCCEEDED(hr))c.mem.write_bytes(out,&caps,sizeof(caps));return uint32_t(hr);});
+    method("IDirectSound8",5,3,[&s,device](Proxy& p,Cpu& c)->uint32_t {uint32_t out=c.arg(2);if(out)c.mem.w32(out,0);IDirectSound8* dev=device(p);if(!dev)return DSERR_UNINITIALIZED_X86;if(!out)return E_POINTER;uint32_t guest=c.arg(1);if(!guest)return DSERR_INVALIDPARAM;auto& original=p.space->by_guest(guest);if(strcmp(original.iface,"IDirectSoundBuffer8")!=0)return DSERR_INVALIDPARAM;IDirectSoundBuffer* duplicate=nullptr;HRESULT hr=dev->DuplicateSoundBuffer(static_cast<IDirectSoundBuffer*>(original.host),&duplicate);if(SUCCEEDED(hr)&&duplicate)c.mem.w32(out,dsound_wrap(s,c,"IDirectSoundBuffer8",reinterpret_cast<IUnknown*>(duplicate)));return uint32_t(hr);});
+    method("IDirectSound8",6,3,[device](Proxy& p,Cpu& c)->uint32_t {IDirectSound8* dev=device(p);if(!dev)return DSERR_UNINITIALIZED_X86;return uint32_t(dev->SetCooperativeLevel(reinterpret_cast<HWND>(uintptr_t(c.arg(1))),c.arg(2)));});
+    method("IDirectSound8",7,1,[device](Proxy& p,Cpu&)->uint32_t {IDirectSound8* dev=device(p);if(!dev)return DSERR_UNINITIALIZED_X86;return uint32_t(dev->Compact());});
+    method("IDirectSound8",8,2,[device](Proxy& p,Cpu& c)->uint32_t {IDirectSound8* dev=device(p);if(!dev)return DSERR_UNINITIALIZED_X86;if(!c.arg(1))return E_POINTER;DWORD config=0;HRESULT hr=dev->GetSpeakerConfig(&config);if(SUCCEEDED(hr))c.mem.w32(c.arg(1),config);return uint32_t(hr);});
+    method("IDirectSound8",9,2,[device](Proxy& p,Cpu& c)->uint32_t {IDirectSound8* dev=device(p);if(!dev)return DSERR_UNINITIALIZED_X86;return uint32_t(dev->SetSpeakerConfig(c.arg(1)));});
+    method("IDirectSound8",10,2,[device_state](Proxy& p,Cpu& c)->uint32_t {
+        DSoundDevice* state=device_state(p);
+        if(state->inner)return DSERR_ALREADYINITIALIZED_X86;
+        GUID id{};GUID* idp=nullptr;if(c.arg(1)){auto bytes=c.mem.read_bytes(c.arg(1),sizeof(id));memcpy(&id,bytes.data(),sizeof(id));idp=&id;}
+        if(!state->host||!state->host->dsound_factory)return DSERR_NODRIVER_X86;
+        uintptr_t result=0;uint32_t hr=uint32_t(state->host->dsound_factory(idp,&result));
+        if(FAILED(HRESULT(hr))||!result){if(result)reinterpret_cast<IUnknown*>(result)->Release();return FAILED(HRESULT(hr))?hr:DSERR_NODRIVER_X86;}
+        state->inner=reinterpret_cast<IDirectSound8*>(result);return hr;
+    });
+    method("IDirectSound8",11,2,[device](Proxy& p,Cpu& c)->uint32_t {IDirectSound8* dev=device(p);if(!dev)return DSERR_UNINITIALIZED_X86;DWORD certified=0;HRESULT hr=dev->VerifyCertification(&certified);if(SUCCEEDED(hr)&&c.arg(1))c.mem.w32(c.arg(1),certified);return uint32_t(hr);});
     method("IDirectSoundBuffer8",3,2,[buffer](Proxy& p,Cpu& c)->uint32_t {if(!c.arg(1))return E_POINTER;DSBCAPS caps{};caps.dwSize=sizeof(caps);HRESULT hr=buffer(p)->GetCaps(&caps);if(SUCCEEDED(hr))c.mem.write_bytes(c.arg(1),&caps,sizeof(caps));return uint32_t(hr);});
     method("IDirectSoundBuffer8",4,3,[buffer](Proxy& p,Cpu& c)->uint32_t {DWORD play=0,write=0;HRESULT hr=buffer(p)->GetCurrentPosition(c.arg(1)?&play:nullptr,c.arg(2)?&write:nullptr);if(SUCCEEDED(hr)){if(c.arg(1))c.mem.w32(c.arg(1),play);if(c.arg(2))c.mem.w32(c.arg(2),write);}return uint32_t(hr);});
     method("IDirectSoundBuffer8",5,4,[buffer](Proxy& p,Cpu& c)->uint32_t {DWORD written=0;DWORD cap=c.arg(2);if(cap&&!c.arg(1))return E_POINTER;WAVEFORMATEX fmt{};HRESULT hr=buffer(p)->GetFormat(cap?&fmt:nullptr,sizeof(fmt),c.arg(3)?&written:nullptr);if(SUCCEEDED(hr)){if(cap)c.mem.write_bytes(c.arg(1),&fmt,std::min<DWORD>(cap,sizeof(fmt)));if(c.arg(3))c.mem.w32(c.arg(3),written);}return uint32_t(hr);});
@@ -203,7 +247,7 @@ inline void register_waveout(Registry& r,Host& h){
 inline void register_dsound(Registry& r,Host& h) {
     register_dsound_com(h.com,h);
     register_waveout(r,h);
-    auto create=[&h](Cpu& c,bool)->uint32_t {if(!c.arg(1))return E_POINTER;c.mem.w32(c.arg(1),0);if(c.arg(2))return DSERR_NOAGGREGATION;GUID id{},*idp=nullptr;if(c.arg(0)){auto bytes=c.mem.read_bytes(c.arg(0),sizeof(id));memcpy(&id,bytes.data(),sizeof(id));idp=&id;}if(!h.dsound_factory)return DSERR_NODRIVER_X86;uintptr_t result=0;uint32_t hr=uint32_t(h.dsound_factory(idp,&result));if(FAILED(HRESULT(hr))||!result)return FAILED(HRESULT(hr))?hr:DSERR_NODRIVER_X86;c.mem.w32(c.arg(1),dsound_wrap(h.com,c,"IDirectSound8",reinterpret_cast<IUnknown*>(result)));return hr;};
+    auto create=[&h](Cpu& c,bool)->uint32_t {if(!c.arg(1))return E_POINTER;c.mem.w32(c.arg(1),0);if(c.arg(2))return DSERR_NOAGGREGATION;GUID id{},*idp=nullptr;if(c.arg(0)){auto bytes=c.mem.read_bytes(c.arg(0),sizeof(id));memcpy(&id,bytes.data(),sizeof(id));idp=&id;}if(!h.dsound_factory)return DSERR_NODRIVER_X86;uintptr_t result=0;uint32_t hr=uint32_t(h.dsound_factory(idp,&result));if(FAILED(HRESULT(hr))||!result){if(result)reinterpret_cast<IUnknown*>(result)->Release();return FAILED(HRESULT(hr))?hr:DSERR_NODRIVER_X86;}c.mem.w32(c.arg(1),dsound_wrap_device(h.com,c,h,reinterpret_cast<IDirectSound8*>(result)));return hr;};
     r.add("dsound.dll","DirectSoundCreate",Conv::Stdcall,3,[create](Cpu& c){return create(c,false);});
     r.add("dsound.dll","#1",Conv::Stdcall,3,[create](Cpu& c){return create(c,false);});
     r.add("dsound.dll","DirectSoundCreate8",Conv::Stdcall,3,[create](Cpu& c){return create(c,true);});
