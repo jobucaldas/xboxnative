@@ -3594,17 +3594,34 @@ inline void Guest::register_all() {
         }else{
             path=str(namep);
             if(path.empty()){set_last_error(87);mem.w(ofp+2,87,2);return 0xffffffffu;}
-            const bool rooted=(path.size()>=2&&path[1]==':')||path[0]=='\\'||path[0]=='/';
-            if(!rooted){
+            auto is_sep=[](char ch){return ch=='\\'||ch=='/';};
+            const bool has_drive=path.size()>=2&&((path[0]>='A'&&path[0]<='Z')||(path[0]>='a'&&path[0]<='z'))&&path[1]==':';
+            const bool drive_abs=has_drive&&path.size()>=3&&is_sep(path[2]);
+            const bool unc=path.size()>=2&&is_sep(path[0])&&is_sep(path[1]);
+            if(!drive_abs&&!unc){
                 Host::FileCall cwd{Host::FileCall::Kind::GetCurrentDirectoryA};cwd.args[0]=260;
-                if(call_file(cwd)&&cwd.value>0&&!cwd.data.empty()){
-                    const size_t n=std::min<size_t>(cwd.data.size(),cwd.value);
-                    std::string base(reinterpret_cast<const char*>(cwd.data.data()),n);
-                    while(!base.empty()&&base.back()=='\0')base.pop_back();
-                    if(!base.empty()){
-                        const bool sep=base.back()=='\\'||base.back()=='/';
-                        path=base+(sep?"":"\\")+path;
+                if(!call_file(cwd)||cwd.value==0){
+                    const uint32_t error=cwd.error?cwd.error:120;
+                    set_last_error(error);mem.w(ofp+2,error,2);return 0xffffffffu;
+                }
+                if(cwd.value>=260){set_last_error(206);mem.w(ofp+2,206,2);return 0xffffffffu;}
+                const size_t n=std::min<size_t>(cwd.data.size(),cwd.value);
+                std::string base(reinterpret_cast<const char*>(cwd.data.data()),n);
+                while(!base.empty()&&base.back()=='\0')base.pop_back();
+                if(base.empty()){set_last_error(120);mem.w(ofp+2,120,2);return 0xffffffffu;}
+                const bool base_has_drive=base.size()>=2&&((base[0]>='A'&&base[0]<='Z')||(base[0]>='a'&&base[0]<='z'))&&base[1]==':';
+                if(has_drive){  // Drive-relative (e.g. C:foo)
+                    auto lower=[](char ch){return ch>='A'&&ch<='Z'?char(ch-'A'+'a'):ch;};
+                    if(!base_has_drive||lower(base[0])!=lower(path[0])){
+                        set_last_error(50);mem.w(ofp+2,50,2);return 0xffffffffu;
                     }
+                    const std::string tail=path.substr(2);
+                    path=base+(is_sep(base.back())?"":"\\")+tail;
+                }else if(is_sep(path[0])){  // Root-relative (e.g. \foo)
+                    if(!base_has_drive){set_last_error(50);mem.w(ofp+2,50,2);return 0xffffffffu;}
+                    path=base.substr(0,2)+path;
+                }else{
+                    path=base+(is_sep(base.back())?"":"\\")+path;
                 }
             }
         }

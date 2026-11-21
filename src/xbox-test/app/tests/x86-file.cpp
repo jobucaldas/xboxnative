@@ -245,6 +245,14 @@ int main() {
     const uint32_t hreopen=kcall("openfile",{0,ofs,0x8000u});
     CHECK(hreopen!=0xffffffffu&&last_createw_path==u"root\\save.dat");
     CHECK(kcall("_lclose",{hreopen})==0);
+    // Drive-relative (C:foo), root-relative (\foo), cross-drive (D:foo), and oversized cwd (>=260) handling.
+    mock_cwd="C:\\dir";
+    uint32_t c_rel=g.put_str("C:foo"),root_rel=g.put_str("\\bar"),d_rel=g.put_str("D:foo");
+    CHECK(kcall("openfile",{c_rel,ofs,0x0100u})==0&&mem.r8(ofs+8)=='C'&&mem.r8(ofs+14)=='\\'&&mem.r8(ofs+15)=='f'&&mem.r8(ofs+18)==0);
+    CHECK(kcall("openfile",{root_rel,ofs,0x0100u})==0&&mem.r8(ofs+8)=='C'&&mem.r8(ofs+9)==':'&&mem.r8(ofs+10)=='\\'&&mem.r8(ofs+11)=='b'&&mem.r8(ofs+14)==0);
+    CHECK(kcall("openfile",{d_rel,ofs,0x0100u})==0xffffffffu&&g.last_error()==50);
+    mock_cwd=std::string(265,'x');
+    CHECK(kcall("openfile",{save_a,ofs,0x0100u})==0xffffffffu&&g.last_error()==206);
     mock_cwd="root";
     for(uint32_t i=0;i<128;++i)mem.w8(ofs+8+i,'x');
     CHECK(kcall("openfile",{0,ofs,0x8000u})==0xffffffffu&&g.last_error()==87);
