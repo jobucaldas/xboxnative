@@ -629,6 +629,36 @@ static void test_routes() {
         r = map(next.first, 0, D3D11_MAP_WRITE_DISCARD, mapped); HR(r, S_OK); r = unmap(next.first, 0); g_log.clear();
         EXPECT(e.host.d3d9_guest_top == top, "a new buffer did not reuse the released scratch (window grew %u)", e.host.d3d9_guest_top - top);
     }
+    {   // released scratch is not stranded by its size: maps `sizes` together, releases them all, then maps `then_bytes`
+        // in the same 16 MiB window. 8 MiB then 12 MiB grows the free range into the untouched window; two 6 MiB
+        // ranges must merge into the 12 MiB one.
+        auto cycle = [&](const std::vector<uint32_t>& sizes, uint32_t then_bytes, bool release_in_reverse) {
+            std::vector<uint32_t> handles;
+            for (uint32_t bytes : sizes) {
+                g_log.clear();
+                auto b = create_buffer(bytes, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+                uint32_t hr = map(b.first, 0, D3D11_MAP_WRITE_DISCARD, mapped); HR(hr, S_OK); handles.push_back(b.first);
+            }
+            for (size_t i = 0; i < handles.size(); ++i) {   // each order merges from the other side
+                const uint32_t g = handles[release_in_reverse ? handles.size() - 1 - i : i];
+                unmap(g, 0); e.host.com.guest_release(e.host.com.by_guest(g));
+            }
+            g_log.clear();
+            auto big = create_buffer(then_bytes, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+            uint32_t hr = 0;
+            const bool faulted = faults([&] { hr = map(big.first, 0, D3D11_MAP_WRITE_DISCARD, mapped); });
+            EXPECT(!faulted && hr == S_OK, "a %u byte map after releasing the scratch of %zu buffers failed (hr 0x%08x)", then_bytes, sizes.size(), hr);
+            if (!faulted) {
+                put_guest(e.mem.r32(mapped), then_bytes - 1, 1, 0x5A); unmap(big.first, 0);
+                EXPECT(big.second->mem[then_bytes - 1] == 0x5A, "the last byte of the %u byte map reached the host", then_bytes);
+            }
+            e.host.com.guest_release(e.host.com.by_guest(big.first)); g_log.clear();
+        };
+        cycle({0x800000}, 0xC00000, false);
+        cycle({0x600000, 0x600000}, 0xC00000, false);
+        cycle({0x600000, 0x600000}, 0xC00000, true);
+        EXPECT(e.host.d3d9_guest_top <= 0x7D000000u + x86::D3D9_GUEST_SIZE, "the bump cursor stayed inside the window");
+    }
 
     // ---- Queries: CreateQuery (device 24), Begin 27, End 28, GetData 29
     r = e.call("ID3D11Device", 24, {dev_g, e.words({1, 0}), out}); HR(r, S_OK); LOG("CreateQuery q=1 misc=0");

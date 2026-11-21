@@ -227,7 +227,7 @@ inline void d3d11_write_swapchain_desc(Cpu& c, uint32_t guest, const DXGI_SWAP_C
 
 // Map state per (host resource, subresource). Guest memory is a bump window that never frees, so each
 // subresource keeps one scratch range (grown only when a bigger map needs it) and a dropped resource
-// hands its range back for reuse. The shadow is host RAM: what the guest last wrote, so a WRITE or
+// hands its range back to a coalescing free list for reuse. The shadow is host RAM: what the guest last wrote, so a WRITE or
 // NO_OVERWRITE map seeds its scratch from it (never reading the host's possibly write-combined memory)
 // and Unmap copies back only the bytes that differ from it, leaving earlier data and GPU-owned bytes alone.
 struct D3d11MapState {
@@ -237,24 +237,44 @@ struct D3d11MapState {
     };
     std::map<std::pair<void*, uint32_t>, Entry> entries;
     std::set<void*> hooked;                                    // resources whose proxy release drops their entries
-    std::vector<std::pair<uint32_t, uint32_t>> free_scratch;   // {guest address, capacity} no resource owns
+    // {guest address, capacity} ranges no resource owns: sorted by address and never adjacent, because
+    // give_back merges neighbours. Ranges are multiples of 16 bytes, like the bump window's alignment.
+    std::vector<std::pair<uint32_t, uint32_t>> free_scratch;
+    void give_back(uint32_t at, uint32_t capacity) {
+        auto it = free_scratch.insert(std::lower_bound(free_scratch.begin(), free_scratch.end(), std::make_pair(at, 0u)), {at, capacity});
+        if (it + 1 != free_scratch.end() && it->first + it->second == (it + 1)->first) { it->second += (it + 1)->second; free_scratch.erase(it + 1); }
+        if (it != free_scratch.begin() && (it - 1)->first + (it - 1)->second == it->first) { (it - 1)->second += it->second; free_scratch.erase(it); }
+    }
+    // One range per subresource, reused while it is big enough. A bigger map takes the smallest free range
+    // that fits (splitting off the rest); failing that, a free range that ends at the bump cursor grows
+    // into the untouched window, so released scratch never strands the 16 MiB window. A throw (the window
+    // cannot hold it) leaves the entry with no scratch and the list consistent.
     uint32_t acquire(Host& h, Cpu& c, Entry& e, uint32_t size) {
-        if (e.scratch && e.capacity >= size) return e.scratch;
+        if (size > D3D9_GUEST_SIZE) return d3d9_guest_buffer(h, c, size);   // the window fault
+        const uint32_t need = (size + 15) & ~15u;
+        if (e.scratch && e.capacity >= need) return e.scratch;
+        if (e.scratch) { give_back(e.scratch, e.capacity); e.scratch = 0; e.capacity = 0; }
         size_t best = free_scratch.size();
         for (size_t i = 0; i < free_scratch.size(); ++i)
-            if (free_scratch[i].second >= size && (best == free_scratch.size() || free_scratch[i].second < free_scratch[best].second)) best = i;
-        uint32_t at = 0, capacity = size;
-        if (best != free_scratch.size()) { at = free_scratch[best].first; capacity = free_scratch[best].second; free_scratch.erase(free_scratch.begin() + best); }
-        else at = d3d9_guest_buffer(h, c, size);
-        if (e.scratch) free_scratch.push_back({e.scratch, e.capacity});
-        e.scratch = at; e.capacity = capacity;
+            if (free_scratch[i].second >= need && (best == free_scratch.size() || free_scratch[i].second < free_scratch[best].second)) best = i;
+        uint32_t at = 0;
+        if (best != free_scratch.size()) {
+            at = free_scratch[best].first;
+            if (free_scratch[best].second > need) free_scratch[best] = {at + need, free_scratch[best].second - need};
+            else free_scratch.erase(free_scratch.begin() + best);
+        } else if (!free_scratch.empty() && (h.d3d9_guest_top & 15) == 0 && free_scratch.back().first + free_scratch.back().second == h.d3d9_guest_top) {
+            at = free_scratch.back().first;
+            d3d9_guest_buffer(h, c, need - free_scratch.back().second);   // lands at the cursor, right after the free range
+            free_scratch.pop_back();
+        } else at = d3d9_guest_buffer(h, c, need);
+        e.scratch = at; e.capacity = need;
         return at;
     }
     // The guest no longer holds the resource: its scratch ranges go back to the free list.
     void drop(void* resource) {
         hooked.erase(resource);
         for (auto it = entries.lower_bound({resource, 0}); it != entries.end() && it->first.first == resource; it = entries.erase(it))
-            if (it->second.scratch) free_scratch.push_back({it->second.scratch, it->second.capacity});
+            if (it->second.scratch) give_back(it->second.scratch, it->second.capacity);
     }
     // The host copy changed behind the shadow (an update or a copy), so the shadow no longer says what is there.
     void invalidate(void* resource) {
