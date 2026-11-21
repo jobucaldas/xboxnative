@@ -1511,11 +1511,37 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
                 q.output.assign(reinterpret_cast<const uint8_t*>(s),reinterpret_cast<const uint8_t*>(s)+n+1);
                 q.result=1;return;
             }
+            // Ground truth for the guest-side shadow bindings: the buffer the host really has bound to `target`
+            // must be the one the guest map/unmap was resolved against, else copy nothing (fail closed).
+            auto binding_matches=[&](unsigned target,unsigned expected){
+                unsigned pname=0;
+                switch(target){
+                    case 0x8892:pname=0x8894;break; case 0x8893:pname=0x8895;break; case 0x88EB:pname=0x88ED;break;
+                    case 0x88EC:pname=0x88EF;break; case 0x8A11:pname=0x8A28;break; case 0x8C8E:pname=0x8C8F;break;
+                    case 0x8F36:case 0x8F37:pname=target;break; case 0x8C2A:pname=0x8C2D;break; case 0x8F3F:pname=0x8F43;break;
+                    case 0x92C0:pname=0x92C1;break; case 0x90D2:pname=0x90D3;break; case 0x90EE:pname=0x90EF;break;
+                    case 0x9192:pname=0x9193;break; default:break;
+                }
+                auto gi=pointer("glGetIntegerv");
+                if(!pname||!gi)return true; // target not queryable: nothing to verify against
+                int bound=0;reinterpret_cast<void(APIENTRY*)(unsigned,int*)>(gi)(pname,&bound);
+                return bound!=0&&unsigned(bound)==expected;
+            };
+            if(q.name=="glBindBufferBase"||q.name=="glBindBufferBaseEXT"||q.name=="glBindBufferRange"||q.name=="glBindBufferRangeEXT"||q.name=="glBindBufferOffsetEXT"||q.name=="glBindVertexArray"||q.name=="glBindVertexArrayAPPLE") {
+                // Report a host GL error so the guest-side shadow binding is left unchanged on a rejected bind.
+                auto p=pointer(q.name.c_str());auto ge=pointer("glGetError");
+                if(!p||!ge||q.signature==65535){missing();return;}
+                auto err_fn=reinterpret_cast<unsigned(APIENTRY*)()>(ge);
+                for(unsigned drain=0;drain<16&&err_fn()!=0;++drain){}
+                q.result=x86::gl_call_generated(q.signature,p,q.args.data());
+                if(err_fn()!=0){q.rejected=true;q.result=0;}
+                return;
+            }
             if(q.name=="glMapBufferRange"||q.name=="glMapBuffer"||q.name=="glMapBufferARB") {
                 using GetSize=void(APIENTRY*)(unsigned,unsigned,int*);using GetData=void(APIENTRY*)(unsigned,intptr_t,intptr_t,void*);
                 auto get_size=pointer("glGetBufferParameteriv");if(!get_size)get_size=pointer("glGetBufferParameterivARB");
                 auto get_data=pointer("glGetBufferSubData");if(!get_data)get_data=pointer("glGetBufferSubDataARB");
-                if(!get_size||!get_data){missing();return;}
+                if(!get_size||!get_data||!binding_matches(unsigned(q.args[0]),q.buffer)){missing();return;}
                 int size=q.name=="glMapBufferRange"?int(q.args[2]):0;
                 if(q.name=="glMapBuffer"||q.name=="glMapBufferARB"){reinterpret_cast<GetSize>(get_size)(unsigned(q.args[0]),0x8764,&size);if(size<=0||size>(1<<26)){missing();return;}}
                 if(size<=0||size>(1<<26)){missing();return;}q.output.resize(size);
@@ -1529,6 +1555,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
                 auto get_err=pointer("glGetError");
                 if(!put||(!q.input.empty()&&!get_err)){missing();return;}
                 if(!q.input.empty()) {
+                    if(!binding_matches(unsigned(q.args[0]),q.buffer)){q.result=0;return;}
                     auto err_fn=reinterpret_cast<GetErr>(get_err);
                     for(unsigned drain=0;drain<16&&err_fn()!=0;++drain){}
                     reinterpret_cast<PutData>(put)(unsigned(q.args[0]),intptr_t(q.args[1]),intptr_t(q.input.size()),q.input.data());

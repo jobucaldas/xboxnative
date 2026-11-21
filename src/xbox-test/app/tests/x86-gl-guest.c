@@ -125,6 +125,8 @@ void WINAPI entry(void) {
     bind_buffer(0x8892u, 10);
     // Invalid access enum must be rejected cleanly without mapping.
     if (map_buffer_arb(0x8892u, 0x1234u) != NULL) fail(34);
+    // READ combined with INVALIDATE_RANGE is an invalid glMapBufferRange access mask.
+    if (map_range(0x8892u, 0, 4, 0x0005u) != NULL) fail(39);
     unsigned char *mapped = (unsigned char *)map_range(0x8892u, 0, 4, 0x0002u);
     if (!mapped) fail(17);
     mapped[0] = 0x7f;

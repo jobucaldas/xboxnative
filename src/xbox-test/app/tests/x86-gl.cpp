@@ -97,7 +97,15 @@ static bool verify_gl_pointer_returns() {
         {20u, {0xA1, 0xA2, 0xA3, 0xA4}},
         {30u, {0xE1, 0xE2, 0xE3, 0xE4}},
         {40u, {0x01, 0x02, 0x03, 0x04}},
+        {50u, {0x51, 0x52, 0x53, 0x54}},
+        {60u, {0x61, 0x62, 0x63, 0x64}},
+        {70u, {0x71, 0x72, 0x73, 0x74}},
+        {80u, {0x81, 0x82, 0x83, 0x84}},
     };
+    // Host-side VAO model: GL_ELEMENT_ARRAY_BUFFER is per-VAO state, so a VAO switch swaps the host binding.
+    std::map<uint32_t, uint32_t> host_vao_element;
+    uint32_t host_vao = 0, host_range_calls = 0;
+    bool binding_mismatch = false;
     auto set_cstr = [](x86::Host::GlCall& q, const char* s) {
         size_t n = std::strlen(s);
         q.output.assign(reinterpret_cast<const uint8_t*>(s), reinterpret_cast<const uint8_t*>(s) + n + 1);
@@ -120,6 +128,21 @@ static bool verify_gl_pointer_returns() {
         if (q.name == "glBindBuffer" || q.name == "glBindBufferARB") {
             if (q.name == "glBindBufferARB") saw_bind_arb = true;
             host_bound[uint32_t(q.args[0])] = uint32_t(q.args[1]);
+            if (q.args[0] == 0x8893u) host_vao_element[host_vao] = uint32_t(q.args[1]);
+            return;
+        }
+        if (q.name == "glBindVertexArray") {
+            host_vao = uint32_t(q.args[0]); host_bound[0x8893u] = host_vao_element[host_vao];
+            return;
+        }
+        if (q.name == "glDeleteVertexArrays") {
+            if (host_vao == 2u) { host_vao = 0; host_bound[0x8893u] = host_vao_element[0]; }
+            return;
+        }
+        if (q.name == "glBindBufferBase" || q.name == "glBindBufferRange" || q.name == "glBindBufferOffsetEXT") {
+            ++host_range_calls;
+            if (q.args[1] >= 4u) { q.rejected = true; return; } // GL_INVALID_VALUE: index out of range
+            host_bound[uint32_t(q.args[0])] = uint32_t(q.args[2]);
             return;
         }
         if (q.name == "glDeleteBuffersARB") { return; }
@@ -131,6 +154,7 @@ static bool verify_gl_pointer_returns() {
                 rejected_map_called_host = true;
                 return;
             }
+            if (q.buffer != buf) { binding_mismatch = true; q.gap = true; return; } // launch.h ground-truth check
             q.output = host_buffers[buf];
             return;
         }
@@ -139,6 +163,7 @@ static bool verify_gl_pointer_returns() {
             const uint32_t buf = host_bound[target];
             if (buf == 30u) { q.result = 0; return; } // simulate glBufferSubData GL error -> GL_FALSE
             if (q.input.empty()) { read_only_unmap_empty = true; q.result = 1u; return; }
+            if (q.buffer != buf) { binding_mismatch = true; q.result = 0; return; }
             host_buffers[buf] = q.input;
             q.result = 1u;
             return;
@@ -165,7 +190,13 @@ static bool verify_gl_pointer_returns() {
     auto map_range = route("glMapBufferRange");
     auto unmap_core = route("glUnmapBuffer");
     auto unmap_arb = route("glUnmapBufferARB");
-    if (!get_string || !get_stringi || !bind_buf || !bind_arb || !del_arb || !map_core || !map_arb || !map_range || !unmap_core || !unmap_arb) return false;
+    auto bind_vao = route("glBindVertexArray");
+    auto del_vao = route("glDeleteVertexArrays");
+    auto bind_base = route("glBindBufferBase");
+    auto bind_range = route("glBindBufferRange");
+    auto bind_offset = route("glBindBufferOffsetEXT");
+    if (!get_string || !get_stringi || !bind_buf || !bind_arb || !del_arb || !map_core || !map_arb || !map_range || !unmap_core || !unmap_arb ||
+        !bind_vao || !del_vao || !bind_base || !bind_range || !bind_offset) return false;
 
     // glGetString returns valid read-only guest string, cached across repeated calls without leaking.
     args({0x1F02u}); uint32_t ver_addr = get_string->fn(cpu);
@@ -212,7 +243,16 @@ static bool verify_gl_pointer_returns() {
     }
     args({0x8892u, 0u, 4u, 0u}); if (map_range->fn(cpu) != 0) return false;
     args({0x8892u, 0u, 4u, 0x0042u}); if (map_range->fn(cpu) != 0) return false;
+    // Invalid glMapBufferRange flag combinations: READ with INVALIDATE_RANGE/INVALIDATE_BUFFER/UNSYNCHRONIZED,
+    // and FLUSH_EXPLICIT without WRITE.
+    for (uint32_t bad_flags : {0x0001u | 0x0004u, 0x0001u | 0x0008u, 0x0001u | 0x0020u, 0x0001u | 0x0010u, 0x0001u | 0x0002u | 0x0004u}) {
+        args({0x8892u, 0u, 4u, bad_flags}); if (map_range->fn(cpu) != 0) return false;
+    }
     if (rejected_map_called_host || !host.gl_maps.empty()) return false;
+    // WRITE with FLUSH_EXPLICIT is a valid combination.
+    args({0x8892u, 0u, 4u, 0x0002u | 0x0010u}); uint32_t addr_flush = map_range->fn(cpu);
+    if (!addr_flush) return false;
+    args({0x8892u}); if (unmap_arb->fn(cpu) != 1u || !host.gl_maps.empty()) return false;
 
     // Cross-target buffer identity: map A (10) on ARRAY_BUFFER, map B (20) on ELEMENT_ARRAY_BUFFER,
     // then bind B (20) to ARRAY_BUFFER via glBindBufferARB and unmap -> must upload B's bytes into B.
@@ -261,6 +301,52 @@ static bool verify_gl_pointer_returns() {
     mem.w32(0x6100, 40u);
     args({1u, 0x6100u}); del_arb->fn(cpu);
     if (mem.mapped(addr_del) || !host.gl_maps.empty() || host.gl_bound_buffers.count(0x8892u)) return false;
+
+    // GL_ELEMENT_ARRAY_BUFFER is VAO-local: vao1 -> 50, vao2 -> 60; each unmap must upload its own VAO's buffer.
+    args({0x8893u, 0u}); bind_buf->fn(cpu);
+    args({1u}); bind_vao->fn(cpu);
+    args({0x8893u, 50u}); bind_buf->fn(cpu);
+    args({0x8893u, 0x88BAu}); uint32_t addr_v1 = map_arb->fn(cpu);
+    if (!addr_v1 || mem.r8(addr_v1) != 0x51) return false;
+    mem.w8(addr_v1, 0xC1);
+    args({2u}); bind_vao->fn(cpu);
+    args({0x8893u, 60u}); bind_buf->fn(cpu);
+    args({0x8893u, 0x88BAu}); uint32_t addr_v2 = map_arb->fn(cpu);
+    if (!addr_v2 || mem.r8(addr_v2) != 0x61) return false;
+    mem.w8(addr_v2, 0xC2);
+    args({0x8893u}); if (unmap_arb->fn(cpu) != 1u) return false;
+    if (host_buffers[60u][0] != 0xC2 || host_buffers[50u][0] != 0x51) return false;
+    args({1u}); bind_vao->fn(cpu);
+    args({0x8893u}); if (unmap_arb->fn(cpu) != 1u) return false;
+    if (host_buffers[50u][0] != 0xC1 || host_buffers[60u][0] != 0xC2 || !host.gl_maps.empty()) return false;
+    // Deleting the active VAO resets the active VAO and drops its element binding.
+    args({2u}); bind_vao->fn(cpu);
+    mem.w32(0x6100, 2u); args({1u, 0x6100u}); del_vao->fn(cpu);
+    if (host.gl_bound_vao != 0 || host.gl_vao_element_buffers.count(2u) || host.gl_vao_element_buffers.count(1u) != 1) return false;
+    args({0x8893u, 0x88BAu}); if (map_arb->fn(cpu) != 0) return false;
+    args({1u}); bind_vao->fn(cpu); args({0u}); bind_vao->fn(cpu);
+
+    // Rejected or invalid indexed binds must leave the previous binding intact so unmap still targets it.
+    args({0x8A11u, 70u}); bind_buf->fn(cpu);
+    host_range_calls = 0;
+    args({0x8A11u, 99u, 80u, 0u, 4u}); bind_range->fn(cpu);       // host rejects: index out of range
+    args({0x8A11u, 99u, 80u}); bind_base->fn(cpu);                // host rejects: index out of range
+    args({0x8A11u, 99u, 80u, 0u}); bind_offset->fn(cpu);          // host rejects: index out of range
+    if (host_range_calls != 3) return false;
+    args({0x8A11u, 0u, 80u, 0u, 0u}); bind_range->fn(cpu);        // size <= 0: not forwarded
+    args({0x8A11u, 0u, 80u, 0xFFFFFFFCu, 4u}); bind_range->fn(cpu); // offset < 0: not forwarded
+    args({0x8A11u, 0u, 80u, 0xFFFFFFFCu}); bind_offset->fn(cpu);  // offset < 0: not forwarded
+    if (host_range_calls != 3) return false;
+    args({0x8A11u, 0x88BAu}); uint32_t addr_r = map_arb->fn(cpu);
+    if (!addr_r || mem.r8(addr_r) != 0x71) return false;
+    mem.w8(addr_r, 0xD1);
+    args({0x8A11u}); if (unmap_arb->fn(cpu) != 1u) return false;
+    if (host_buffers[70u][0] != 0xD1 || host_buffers[80u][0] != 0x81 || binding_mismatch) return false;
+    // A valid range bind is accepted and retargets the shadow binding.
+    args({0x8A11u, 0u, 80u, 0u, 4u}); bind_range->fn(cpu);
+    args({0x8A11u, 0x88BAu}); addr_r = map_arb->fn(cpu);
+    if (!addr_r || mem.r8(addr_r) != 0x81) return false;
+    args({0x8A11u}); if (unmap_arb->fn(cpu) != 1u || binding_mismatch || host.gl_bound_buffers[0x8A11u] != 80u) return false;
 
     // Unbridged pointer-returning GL calls and void** output-pointer calls must fail closed
     // without calling host.gl_call or returning a truncated host pointer.
