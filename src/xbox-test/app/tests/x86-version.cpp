@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
     CHECK(kcall("verqueryvaluea",{buf,roota,out,0})==1);
     CHECK(kcall("verqueryvaluew",{0x8900,rootw,out,lenp})==0&&g.last_error()==87);
 
-    // VerFindFile does no lookup, so the destination is the app directory; a short buffer reports VFF_BUFFTOOSMALL (4) and the needed length.
+    // VerFindFile does no lookup: private files target the app directory, shared files (VFFF_ISSHAREDFILE) target System32.
     const uint32_t appa=g.put_str("C:\\game"),appw=g.put_wstr(u"C:\\game"),vdlen=0x8820,vdest=0x8830;
     mem.w32(vdlen,4);
     CHECK(kcall("verfindfilea",{0,fixa,0,appa,0,0,vdest,vdlen})==4&&mem.r32(vdlen)==8&&mem.r8(vdest)=='C'&&mem.r8(vdest+3)==0);
@@ -106,6 +106,10 @@ int main(int argc, char** argv) {
     CHECK(kcall("verfindfilea",{0,fixa,0,appa,0,0,vdest,vdlen})==0&&mem.r32(vdlen)==8&&mem.r8(vdest+6)=='e'&&mem.r8(vdest+7)==0);
     mem.w32(vdlen,16);
     CHECK(kcall("verfindfilew",{0,fixw,0,appw,0,0,vdest,vdlen})==0&&mem.r32(vdlen)==8&&mem.r(vdest+12,2)=='e'&&mem.r(vdest+14,2)==0);
+    mem.w32(vdlen,32);
+    CHECK(kcall("verfindfilea",{1,fixa,0,appa,0,0,vdest,vdlen})==0&&mem.r32(vdlen)==20&&mem.r8(vdest+11)=='S'&&mem.r8(vdest+18)=='2'&&mem.r8(vdest+19)==0);
+    mem.w32(vdlen,32);
+    CHECK(kcall("verfindfilew",{1,fixw,0,appw,0,0,vdest,vdlen})==0&&mem.r32(vdlen)==20&&mem.r(vdest+22,2)=='S'&&mem.r(vdest+36,2)=='2'&&mem.r(vdest+38,2)==0);
 
     std::printf("x86-version: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }

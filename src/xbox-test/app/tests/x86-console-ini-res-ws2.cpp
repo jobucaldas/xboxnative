@@ -26,12 +26,14 @@ int main() {
     CHECK(call("kernel32.dll","peekconsoleinputa",{0x10,inbuf,1,nread})==0&&g.last_error()==6);
     CHECK(call("kernel32.dll","getnumberofconsoleinputevents",{0x10,nread})==0&&g.last_error()==6);
     CHECK(call("kernel32.dll","writeconsolea",{0x10,msg,2,nread,0})==0&&g.last_error()==6);
+    CHECK(call("kernel32.dll","writeconsolea",{Host::H_STDOUT,msg,(1u<<24)+1,nread,0})==0&&g.last_error()==87);
+    CHECK(call("kernel32.dll","writeconsolea",{Host::H_STDOUT,0,2,nread,0})==0&&g.last_error()==87);
     CHECK(call("kernel32.dll","writeconsolea",{Host::H_STDOUT,msg,2,nread,0})==1&&mem.r32(nread)==2);
     CHECK(host.out.size()>=2&&host.out.compare(host.out.size()-2,2,"hi")==0);
-    // Child processes are refused (ERROR_ACCESS_DENIED) with the command logged; the current-process pseudo handle is still active.
-    uint32_t cmd=g.put_wstr(u"cmd.exe /c dir");
+    // Child processes are refused (ERROR_ACCESS_DENIED) with only the executable token logged (arguments redacted).
+    uint32_t cmd=g.put_wstr(u"cmd.exe /c secret_token");
     CHECK(call("kernel32.dll","createprocessw",{0,cmd,0,0,0,0,0,0,0,0})==0&&g.last_error()==5);
-    CHECK(host.err.find("CreateProcessW refused")!=std::string::npos&&host.err.find("cmd.exe /c dir")!=std::string::npos);
+    CHECK(host.err.find("CreateProcessW refused")!=std::string::npos&&host.err.find("cmd.exe")!=std::string::npos&&host.err.find("secret_token")==std::string::npos);
     CHECK(call("kernel32.dll","createprocessw",{0,0,0,0,0,0,0,0,0,0})==0&&g.last_error()==87);
     CHECK(call("kernel32.dll","getexitcodeprocess",{0xffffffffu,nread})==1&&mem.r32(nread)==259&&g.last_error()==0);
     CHECK(call("kernel32.dll","getexitcodeprocess",{0x10,nread})==0&&g.last_error()==6);
@@ -39,22 +41,27 @@ int main() {
     CHECK(call("kernel32.dll","createpipe",{nread,nread,0,0})==0&&g.last_error()==50);
     CHECK(call("kernel32.dll","beep",{800,100})==1);
     CHECK(call("kernel32.dll","seterrormode",{0x8001})==0&&call("kernel32.dll","seterrormode",{0x2})==0x8001&&call("kernel32.dll","seterrormode",{0})==0x2);
-    CHECK(call("kernel32.dll","delayloadfailurehook",{msg,msg})==0);
+    bool dl_faulted=false;try{call("kernel32.dll","delayloadfailurehook",{msg,msg});}catch(const Fault& f){dl_faulted=f.kind==FaultKind::Unsupported;}
+    CHECK(dl_faulted);
     // RTL_BITMAP over guest memory: bit i is bit i%32 of the DWORD at Buffer + 4*(i/32).
     const uint32_t bmap=0x3500,bbuf=0x3510,vfmt=g.put_str("v=%d"),vap=0x3540,vout=0x3600;
     mem.w32(bbuf,0);mem.w32(bbuf+4,0);mem.w32(vap,42);
     call("ntdll.dll","rtlinitializebitmap",{bmap,bbuf,64});
     CHECK(mem.r32(bmap)==64&&mem.r32(bmap+4)==bbuf);
-    CHECK(call("ntdll.dll","rtlarebitsclear",{bmap,0,64})==1&&call("ntdll.dll","rtlarebitsset",{bmap,0,0})==1);
+    CHECK(call("ntdll.dll","rtlarebitsclear",{bmap,0,64})==1&&call("ntdll.dll","rtlarebitsset",{bmap,0,0})==0&&call("ntdll.dll","rtlarebitsclear",{bmap,0,0})==0);
     call("ntdll.dll","rtlsetbits",{bmap,3,8});
     CHECK(mem.r32(bbuf)==0x7f8u&&call("ntdll.dll","rtlarebitsset",{bmap,3,8})==1&&call("ntdll.dll","rtlarebitsset",{bmap,2,8})==0);
     CHECK(call("ntdll.dll","rtlarebitsclear",{bmap,11,5})==1&&call("ntdll.dll","rtlarebitsclear",{bmap,10,1})==0);
     CHECK(call("ntdll.dll","rtlarebitsclear",{bmap,60,8})==0&&call("ntdll.dll","rtlarebitsset",{bmap,60,8})==0);
     call("ntdll.dll","rtlsetbits",{bmap,30,4});
     CHECK(mem.r32(bbuf)==0xc00007f8u&&mem.r32(bbuf+4)==0x3u);
-    // ntdll's _vsnprintf: the msvcrt formatter, with -1 when the output does not fit.
+    // ntdll's _vsnprintf: writes min(len, cap) bytes, appends NUL only when len < cap, returns -1 on truncation.
     CHECK(call("ntdll.dll","_vsnprintf",{vout,8,vfmt,vap})==4&&mem.r8(vout)=='v'&&mem.r8(vout+3)=='2'&&mem.r8(vout+4)==0);
-    CHECK(call("ntdll.dll","_vsnprintf",{vout,4,vfmt,vap})==4&&call("ntdll.dll","_vsnprintf",{vout,3,vfmt,vap})==0xffffffffu);
+    for(uint32_t i=0;i<6;++i)mem.w8(vout+i,0x55);
+    CHECK(call("ntdll.dll","_vsnprintf",{vout,4,vfmt,vap})==4&&mem.r8(vout)=='v'&&mem.r8(vout+1)=='='&&mem.r8(vout+2)=='4'&&mem.r8(vout+3)=='2'&&mem.r8(vout+4)==0x55);
+    for(uint32_t i=0;i<6;++i)mem.w8(vout+i,0x55);
+    CHECK(call("ntdll.dll","_vsnprintf",{vout,3,vfmt,vap})==0xffffffffu&&mem.r8(vout)=='v'&&mem.r8(vout+1)=='='&&mem.r8(vout+2)=='4'&&mem.r8(vout+3)==0x55);
+    CHECK(call("ntdll.dll","_vsnprintf",{0,0,vfmt,vap})==4);
 
     std::string profile="; comment\r\n[Video]\r\nWidth = 1280\r\nTitle=\"A test\"\r\n[Other]\r\nWidth=1\r\n";
     bool saw_wide_path=false;host.file_call=[&](Host::FileCall& q){if(q.kind==Host::FileCall::Kind::CreateW){std::string path(q.path_w.begin(),q.path_w.end());saw_wide_path|=path=="settings.ini";if(path=="missing.ini"){q.error=2;return;}q.value=42;if(q.args[2]==2)profile.clear();q.succeeded=true;}else if(q.kind==Host::FileCall::Kind::Size){q.value=profile.size();q.succeeded=q.handle==42;}else if(q.kind==Host::FileCall::Kind::Read){q.data.assign(profile.begin(),profile.end());q.args[1]=profile.size();q.succeeded=q.handle==42;}else if(q.kind==Host::FileCall::Kind::Write){profile.assign(q.data.begin(),q.data.end());q.args[0]=q.data.size();q.succeeded=q.handle==42;}else if(q.kind==Host::FileCall::Kind::Close)q.succeeded=q.handle==42;};
