@@ -71,6 +71,7 @@ struct Host {
         std::vector<GlArgKind> arg_kinds;
         std::vector<unsigned> arg_slots;
         unsigned short signature = 65535;
+        GlReturnKind return_kind = GlReturnKind::Void;
         std::vector<PointerBuffer> pointers;
         std::vector<std::vector<uint8_t>> shader_sources;
         std::vector<int32_t> shader_lengths;
@@ -142,9 +143,11 @@ struct Host {
     std::map<uint32_t, std::u16string> window_class_atoms;
     std::map<std::pair<uint32_t, std::u16string>, uint32_t> window_properties;
     std::map<uint32_t, GlMap> gl_maps;
+    std::map<std::string, uint32_t> gl_strings;
     std::vector<Timer> timers;
     uint32_t next_timer_id = 1;
     uint32_t window_class_serial = 0xC000u, gl_handle_serial = 0xE0000000u, window_handle_serial = 0xD0000000u, user_handle_serial = 0xC0000000u, gl_map_next = 0x70000000u;
+    uint32_t gl_string_cursor = 0, gl_string_end = 0, gl_string_next = 0x76000000u;
     uint32_t vertex_array = 0, gl_array_buffer = 0, gl_element_array_buffer = 0;
     std::function<uintptr_t(bool, uint32_t, uintptr_t*)> d3d9_factory;
     std::function<uintptr_t(const void*, uintptr_t*)> dsound_factory;
@@ -1052,21 +1055,77 @@ inline void register_gl(Registry& r, Host& h) {
         if (it == r.map.end()) return 0;
         return c.thunks.add(it->second);
     });
+    auto intern_gl_string = [&h](Cpu& c, const std::string& text) -> uint32_t {
+        const size_t need = text.size() + 1;
+        if (need > (1u << 20)) return 0;
+        auto it = h.gl_strings.find(text);
+        if (it != h.gl_strings.end() && c.mem.range_accessible(it->second, uint32_t(need), PROT_R)) return it->second;
+        uint32_t addr = 0;
+        if (h.gl_string_cursor && uint64_t(h.gl_string_cursor) + need <= h.gl_string_end &&
+            c.mem.range_accessible(h.gl_string_cursor, uint32_t(need), PROT_R)) {
+            addr = h.gl_string_cursor;
+            h.gl_string_cursor += uint32_t(need);
+        } else {
+            const uint32_t alloc_size = uint32_t((need + Memory::PAGE - 1) & ~(size_t(Memory::PAGE) - 1));
+            uint32_t candidate = (h.gl_string_next + Memory::PAGE - 1) & ~(Memory::PAGE - 1);
+            if (candidate < 0x70000000u || candidate >= 0xF0000000u) candidate = 0x70000000u;
+            bool found = false;
+            for (unsigned attempt = 0; attempt < 4096; ++attempt) {
+                if (c.mem.free_range(candidate, alloc_size)) { found = true; break; }
+                candidate += alloc_size;
+                if (candidate < 0x70000000u || candidate >= 0xF0000000u) candidate = 0x70000000u;
+            }
+            if (!found) return 0;
+            c.mem.map(candidate, alloc_size, PROT_R);
+            addr = candidate;
+            h.gl_string_next = candidate + alloc_size;
+            const uint32_t remaining = alloc_size - uint32_t(need);
+            if (!h.gl_string_cursor || remaining > h.gl_string_end - h.gl_string_cursor) {
+                h.gl_string_cursor = candidate + uint32_t(need);
+                h.gl_string_end = candidate + alloc_size;
+            }
+        }
+        const uint32_t page_base = addr & ~(Memory::PAGE - 1);
+        const uint32_t page_end = uint32_t((uint64_t(addr) + need + Memory::PAGE - 1) & ~uint64_t(Memory::PAGE - 1));
+        c.mem.protect(page_base, page_end - page_base, PROT_R | PROT_W);
+        if (!text.empty()) c.mem.write_bytes(addr, text.data(), uint32_t(text.size()));
+        c.mem.w8(addr + uint32_t(text.size()), 0);
+        c.mem.protect(page_base, page_end - page_base, PROT_R);
+        h.gl_strings[text] = addr;
+        return addr;
+    };
     for (unsigned export_index = 0; export_index < sizeof(kGlExports) / sizeof(kGlExports[0]); ++export_index) {
         const auto& exported = kGlExports[export_index];
         const unsigned short signature = kGlSignatureIds[export_index];
+        const GlReturnKind return_kind = kGlReturnKinds[export_index];
         const std::string name = exported.name;
         const unsigned argc = exported.argc;
         const unsigned first_arg = exported.first_arg;
         const unsigned arg_count = exported.arg_count;
-        r.add("opengl32.dll", name, Conv::Stdcall, argc, [&h, call, count, name, argc, first_arg, arg_count, signature](Cpu& c) -> uint32_t {
-            count(name); Host::GlCall q{}; q.name = name; q.signature = signature;
+        r.add("opengl32.dll", name, Conv::Stdcall, argc, [&h, call, count, intern_gl_string, name, argc, first_arg, arg_count, signature, return_kind](Cpu& c) -> uint32_t {
+            count(name); Host::GlCall q{}; q.name = name; q.signature = signature; q.return_kind = return_kind;
             for (unsigned i = 0; i < argc; ++i) q.args.push_back(c.arg(i));
+            bool has_unsupported_arg = false;
             for (unsigned i = 0; i < arg_count; ++i) {
-                q.arg_kinds.push_back(kGlArgs[first_arg + i].kind);
+                const GlArgKind kind = kGlArgs[first_arg + i].kind;
+                q.arg_kinds.push_back(kind);
                 q.arg_slots.push_back(kGlArgs[first_arg + i].slots);
+                has_unsupported_arg = has_unsupported_arg || kind == GlArgKind::Unsupported;
             }
-            if (name == "glMapBufferRange" || name == "glMapBuffer") {
+            if (name == "glGetString" || name == "glGetStringi") {
+                if (!call(c, q) || q.gap) return 0;
+                if (q.output.empty()) {
+                    if (q.result) { q.gap = true; call(c, q); }
+                    return 0;
+                }
+                size_t len = 0;
+                while (len < q.output.size() && q.output[len] != 0) ++len;
+                if (len >= (1u << 20)) { q.gap = true; call(c, q); return 0; }
+                const uint32_t guest_str = intern_gl_string(c, std::string(reinterpret_cast<const char*>(q.output.data()), len));
+                if (!guest_str) { q.gap = true; call(c, q); return 0; }
+                return guest_str;
+            }
+            if (name == "glMapBufferRange" || name == "glMapBuffer" || name == "glMapBufferARB") {
                 const uint32_t target = uint32_t(q.args[0]);
                 const uint32_t size = name == "glMapBufferRange" ? uint32_t(q.args[2]) : 0;
                 const uint32_t access = uint32_t(q.args[name == "glMapBufferRange" ? 3 : 1]);
@@ -1090,7 +1149,7 @@ inline void register_gl(Registry& r, Host& h) {
                 h.gl_map_next = address + uint32_t((map_size + Memory::PAGE - 1) & ~(size_t(Memory::PAGE - 1)));
                 return address;
             }
-            if (name == "glUnmapBuffer") {
+            if (name == "glUnmapBuffer" || name == "glUnmapBufferARB") {
                 const uint32_t target = uint32_t(q.args[0]); auto it = h.gl_maps.find(target);
                 if (it == h.gl_maps.end()) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
                 Host::GlCall unmap{}; unmap.name = "x86GlUnmapBuffer"; unmap.args = {target, it->second.offset};
@@ -1099,7 +1158,12 @@ inline void register_gl(Registry& r, Host& h) {
                 c.mem.unmap(it->second.address, it->second.size); h.gl_maps.erase(it);
                 return ok ? 1u : 0u;
             }
-            if (name == "glBindBuffer" && q.args.size() == 2 && (q.args[0] == 0x8892u || q.args[0] == 0x8893u)) {
+            if (return_kind == GlReturnKind::Pointer || has_unsupported_arg) {
+                // Unbridged pointer-returning calls and pointer-to-pointer out-params must
+                // fail closed instead of handing a truncated 64-bit host address to the guest.
+                q.gap = true; call(c, q); return 0;
+            }
+            if ((name == "glBindBuffer" || name == "glBindBufferARB") && q.args.size() == 2 && (q.args[0] == 0x8892u || q.args[0] == 0x8893u)) {
                 if (!call(c, q) || q.gap) return 0;
                 if (q.args[0] == 0x8892u) h.gl_array_buffer = uint32_t(q.args[1]);
                 else h.gl_element_array_buffer = uint32_t(q.args[1]);
@@ -1321,7 +1385,7 @@ inline void register_gl(Registry& r, Host& h) {
             if (!q.gap && !q.output.empty() && output_dst) c.mem.write_bytes(output_dst, q.output.data(), uint32_t(q.output.size()));
             if (!q.gap) for (const auto& pointer_buffer : q.pointers) if (pointer_buffer.output && !pointer_buffer.bytes.empty())
                 c.mem.write_bytes(pointer_buffer.guest_address, pointer_buffer.bytes.data(), uint32_t(pointer_buffer.bytes.size()));
-            return uint32_t(q.result);
+            return q.gap ? 0u : uint32_t(q.result);
         });
     }
     // WGL entry points also participate in GetProcAddress dispatch.

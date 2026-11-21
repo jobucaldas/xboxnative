@@ -11,6 +11,11 @@ command -v "$cc32" >/dev/null || { echo "x86-gl: no $cc32" >&2; exit 1; }
 python3 -I "$root/src/tools/gen-x86-gl.py" --check
 # Host GL proc lookup must clear the GetProcAddress error on success (launch.h gl_call path).
 grep -Fq 'if(p) SetLastError(ERROR_SUCCESS);' "$root/src/xbox-test/app/launch.h"
+# Host GL dispatch must marshal glGetString/glGetStringi into q.output, handle glMapBufferARB,
+# and refuse unbridged pointer-returning functions on the generated catch-all path.
+grep -Fq 'if(q.name=="glGetString"||q.name=="glGetStringi")' "$root/src/xbox-test/app/launch.h"
+grep -Fq 'if(q.name=="glMapBufferRange"||q.name=="glMapBuffer"||q.name=="glMapBufferARB")' "$root/src/xbox-test/app/launch.h"
+grep -Fq 'q.return_kind!=x86::GlReturnKind::Pointer' "$root/src/xbox-test/app/launch.h"
 "$cc32" -O1 -Wall -Wextra -Werror -Wno-cast-function-type -nostdlib -Wl,--entry,entry@0 -Wl,--subsystem,console \
   -o "$tmp/x86-gl-guest.exe" "$here/x86-gl-guest.c" -lkernel32 -luser32 -lgdi32 -lopengl32
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror \

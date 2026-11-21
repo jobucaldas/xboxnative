@@ -65,7 +65,7 @@ def generate(data, manifest):
         return commands.get(alias) if alias else command
 
     expected = {item["name"]: item["argc"] for item in manifest.get("functions", [])}
-    rows, parameters, parameter_sizes, signature_ids, signatures = [], [], [], [], []
+    rows, parameters, parameter_sizes, signature_ids, return_kinds, signatures = [], [], [], [], [], []
     signature_map = {}
     actual_slots = {}
     for name in sorted(selected):
@@ -84,7 +84,7 @@ def generate(data, manifest):
             wide = ptype in WIDE_TYPES and not pointer
             kind = "Pointer" if pointer else "Float" if ptype in FLOAT_TYPES else "Double" if ptype in WIDE_TYPES and ptype in {"GLdouble", "GLclampd"} else "Int64" if wide else "Scalar" if ptype in type_declarations or ptype in SCALAR_ALIASES else "Unsupported"
             if explicit_pointer and not const:
-                kind = "OutputPointer"
+                kind = "Unsupported" if text.count("*") > 1 else "OutputPointer"
             arg_slots = 2 if wide else 1
             slots += arg_slots
             kinds.append(kind)
@@ -109,7 +109,8 @@ def generate(data, manifest):
         return_type_node = proto.find("ptype")
         return_type = return_type_node.text if return_type_node is not None and return_type_node.text else "void"
         return_pointer = "*" in "".join(proto.itertext()) or "*" in type_declarations.get(return_type, "")
-        return_kind = "Void" if return_type == "void" else "Pointer" if return_pointer else "Float" if return_type in FLOAT_TYPES else "Double" if return_type in {"GLdouble", "GLclampd"} else "Int64" if return_type in WIDE_TYPES else "Scalar"
+        return_kind = "Pointer" if return_pointer else "Void" if return_type == "void" else "Float" if return_type in FLOAT_TYPES else "Double" if return_type in {"GLdouble", "GLclampd"} else "Int64" if return_type in WIDE_TYPES else "Scalar"
+        return_kinds.append(f"GlReturnKind::{return_kind}")
         shape = (return_kind, tuple(kinds))
         if "Unsupported" in kinds:
             signature_ids.append(65535)
@@ -149,6 +150,7 @@ def generate(data, manifest):
         result = f"fn({', '.join(arguments)}); return 0;" if return_kind == "Void" else f"return gl_return_value({call});"
         adapters.append(f"inline uintptr_t gl_call_shape_{signature_id}(uintptr_t p, const uintptr_t* a) {{ (void)a; using Fn = {return_type}(*)({', '.join(argument_types)}); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; {result} }}")
     id_rows = ["    " + ", ".join(str(value) for value in signature_ids[i:i + 16]) for i in range(0, len(signature_ids), 16)]
+    return_kind_rows = ["    " + ", ".join(return_kinds[i:i + 8]) for i in range(0, len(return_kinds), 8)]
     size_rows = ["    " + ", ".join(str(value) for value in parameter_sizes[i:i + 16]) for i in range(0, len(parameter_sizes), 16)]
     dispatch = [f"        case {i}: return gl_call_shape_{i}(p, a);" for i in range(len(signatures))]
     return """// SPDX-License-Identifier: GPL-3.0-or-later
@@ -159,6 +161,7 @@ def generate(data, manifest):
 #include <type_traits>
 namespace x86 {
 enum class GlArgKind : unsigned char { Scalar, Float, Double, Int64, Pointer, OutputPointer, Unsupported };
+enum class GlReturnKind : unsigned char { Void, Scalar, Float, Double, Int64, Pointer };
 struct GlArg { const char* name; GlArgKind kind; unsigned slots; const char* length; };
 struct GlExport { const char* name; unsigned argc; unsigned first_arg; unsigned arg_count; };
 inline float gl_arg_float(uintptr_t word) { uint32_t bits = uint32_t(word); float value; std::memcpy(&value, &bits, sizeof(value)); return value; }
@@ -166,7 +169,7 @@ inline uint64_t gl_arg_u64(uintptr_t lo, uintptr_t hi) { return uint64_t(uint32_
 inline double gl_arg_double(uintptr_t lo, uintptr_t hi) { uint64_t bits = gl_arg_u64(lo, hi); double value; std::memcpy(&value, &bits, sizeof(value)); return value; }
 template<class T> inline uintptr_t gl_return_value(T value) { if constexpr (std::is_pointer_v<T>) return reinterpret_cast<uintptr_t>(value); else if constexpr (std::is_floating_point_v<T>) { uintptr_t bits = 0; std::memcpy(&bits, &value, sizeof(value)); return bits; } else return uintptr_t(value); }
 inline constexpr GlArg kGlArgs[] = {
-""" + ",\n".join(parameters) + "\n};\ninline constexpr GlExport kGlExports[] = {\n" + ",\n".join(rows) + "\n};\ninline constexpr unsigned short kGlSignatureIds[] = {\n" + ",\n".join(id_rows) + "\n};\ninline constexpr unsigned char kGlArgSizes[] = {\n" + ",\n".join(size_rows) + "\n};\n" + "\n".join(adapters) + "\ninline uintptr_t gl_call_generated(unsigned short signature, uintptr_t p, const uintptr_t* a) { switch (signature) {\n" + "\n".join(dispatch) + "\n        default: return 0; } }\n}\n"
+""" + ",\n".join(parameters) + "\n};\ninline constexpr GlExport kGlExports[] = {\n" + ",\n".join(rows) + "\n};\ninline constexpr unsigned short kGlSignatureIds[] = {\n" + ",\n".join(id_rows) + "\n};\ninline constexpr GlReturnKind kGlReturnKinds[] = {\n" + ",\n".join(return_kind_rows) + "\n};\ninline constexpr unsigned char kGlArgSizes[] = {\n" + ",\n".join(size_rows) + "\n};\n" + "\n".join(adapters) + "\ninline uintptr_t gl_call_generated(unsigned short signature, uintptr_t p, const uintptr_t* a) { switch (signature) {\n" + "\n".join(dispatch) + "\n        default: return 0; } }\n}\n"
 
 
 def main():
