@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // PE32 D3D11 imports and COM proxy marshalling onto the host's 64-bit D3D11.
 // Phase 1 is device and swapchain creation plus the draw path a 2D game uses.
+// Phase 2 adds depth-stencil views, mip/array/BC textures and boxed updates,
+// direction-aware Map, queries, copies, instancing and swapchain fullscreen state.
 // Every other vtable slot is a named gap: it logs "x86 D3D11 gap: Interface::Method"
 // and returns E_NOTIMPL, the same rule the D3D9 bridge applies.
 //
@@ -36,6 +38,9 @@ inline constexpr const char* const kD3D11ResourceNames[] = {"QueryInterface","Ad
 inline constexpr unsigned kD3D11ResourceArgc[] = {3,1,1,2,4,4,3,2,2,1,2};
 inline constexpr const char* const kD3D11ViewNames[] = {"QueryInterface","AddRef","Release","GetDevice","GetPrivateData","SetPrivateData","SetPrivateDataInterface","GetResource","GetDesc"};
 inline constexpr unsigned kD3D11ViewArgc[] = {3,1,1,2,4,4,3,2,2};
+// ID3D11Query: ID3D11DeviceChild + ID3D11Asynchronous::GetDataSize + ID3D11Query::GetDesc.
+inline constexpr const char* const kD3D11QueryNames[] = {"QueryInterface","AddRef","Release","GetDevice","GetPrivateData","SetPrivateData","SetPrivateDataInterface","GetDataSize","GetDesc"};
+inline constexpr unsigned kD3D11QueryArgc[] = {3,1,1,2,4,4,3,1,2};
 inline constexpr const char* const kD3D11ChildNames[] = {"QueryInterface","AddRef","Release","GetDevice","GetPrivateData","SetPrivateData","SetPrivateDataInterface"};
 inline constexpr unsigned kD3D11ChildArgc[] = {3,1,1,2,4,4,3};
 inline constexpr const char* const kD3D11StateNames[] = {"QueryInterface","AddRef","Release","GetDevice","GetPrivateData","SetPrivateData","SetPrivateDataInterface","GetDesc"};
@@ -74,16 +79,71 @@ inline std::string d3d11_cstring(Cpu& c, uint32_t address) {
     for (uint32_t i = 0; address && i < 256; ++i) { uint8_t ch = c.mem.r8(address + i); if (!ch) break; s.push_back(char(ch)); }
     return s;
 }
+inline bool d3d11_is_bc(DXGI_FORMAT f) {
+    return (f >= DXGI_FORMAT_BC1_TYPELESS && f <= DXGI_FORMAT_BC5_SNORM) || (f >= DXGI_FORMAT_BC6H_TYPELESS && f <= DXGI_FORMAT_BC7_UNORM_SRGB);
+}
+// Rows of pixel data in one mip: BC formats store 4x4 blocks, so ceil(height / 4) block rows.
+inline uint32_t d3d11_mip_rows(const D3D11_TEXTURE2D_DESC& d, uint32_t level) {
+    uint32_t h = std::max<uint32_t>(1, d.Height >> level);
+    return d3d11_is_bc(d.Format) ? (h + 3) / 4 : h;
+}
 // Bytes of one subresource: buffers are ByteWidth, 2D textures are pitch * rows of that mip.
+// 0 means unsupported, out of range, or larger than the guest scratch window.
 inline uint32_t d3d11_subresource_bytes(ID3D11Resource* r, uint32_t sub, uint32_t row_pitch) {
     D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN; r->GetType(&dim);
     if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) { D3D11_BUFFER_DESC d{}; static_cast<ID3D11Buffer*>(r)->GetDesc(&d); return d.ByteWidth; }
     if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
         D3D11_TEXTURE2D_DESC d{}; static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);
         uint32_t mips = d.MipLevels ? d.MipLevels : 1;
-        return row_pitch * std::max<uint32_t>(1, d.Height >> (sub % mips));
+        if (mips > 15 || sub >= uint64_t(mips) * d.ArraySize) return 0;
+        uint64_t bytes = uint64_t(row_pitch) * d3d11_mip_rows(d, sub % mips);
+        return bytes > D3D9_GUEST_SIZE ? 0 : uint32_t(bytes);
     }
     return 0;
+}
+// Guest bytes an UpdateSubresource reads: the whole subresource, or the box of it.
+// -1 is an invalid box, pitch or subresource; 0 is an empty box (a no-op in D3D11).
+inline int64_t d3d11_update_bytes(ID3D11Resource* r, uint32_t sub, const D3D11_BOX* box, uint32_t row_pitch) {
+    if (!box) { uint32_t n = d3d11_subresource_bytes(r, sub, row_pitch); return n ? int64_t(n) : -1; }
+    if (box->left > box->right || box->top > box->bottom || box->front > box->back) return -1;
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN; r->GetType(&dim);
+    uint32_t width = 0, height = 1, level = 0; const D3D11_TEXTURE2D_DESC* tex = nullptr; D3D11_TEXTURE2D_DESC d{};
+    if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+        D3D11_BUFFER_DESC b{}; static_cast<ID3D11Buffer*>(r)->GetDesc(&b); width = b.ByteWidth;
+        if (sub != 0) return -1;
+    } else if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        static_cast<ID3D11Texture2D*>(r)->GetDesc(&d); tex = &d;
+        uint32_t mips = d.MipLevels ? d.MipLevels : 1;
+        if (mips > 15 || sub >= uint64_t(mips) * d.ArraySize) return -1;
+        level = sub % mips; width = std::max<uint32_t>(1, d.Width >> level); height = std::max<uint32_t>(1, d.Height >> level);
+    } else return -1;
+    if (box->right > width || box->bottom > height || box->back > 1) return -1;
+    if (box->left == box->right || box->top == box->bottom || box->front == box->back) return 0;
+    if (!tex) return int64_t(box->right - box->left);
+    uint32_t rows = d3d11_is_bc(d.Format) ? (box->bottom - box->top + 3) / 4 : box->bottom - box->top;
+    uint64_t bytes = uint64_t(row_pitch) * rows;
+    return (!row_pitch || bytes > D3D9_GUEST_SIZE) ? -1 : int64_t(bytes);
+}
+// CreateTexture2D initial data: pInitialData is MipLevels * ArraySize guest D3D11_SUBRESOURCE_DATA
+// entries of 12 bytes ({pSysMem, SysMemPitch, SysMemSlicePitch}), mip-major within each array slice.
+// MipLevels 0 is the full chain down to 1x1. The total stays inside the guest scratch window.
+inline HRESULT d3d11_read_texture_init(Cpu& c, uint32_t guest, const D3D11_TEXTURE2D_DESC& desc,
+                                       std::vector<std::vector<uint8_t>>& bytes, std::vector<D3D11_SUBRESOURCE_DATA>& subs) {
+    if (!desc.Width || !desc.Height || !desc.ArraySize || desc.ArraySize > 2048 || desc.MipLevels > 15) return E_INVALIDARG;
+    uint32_t mips = desc.MipLevels;
+    if (!mips) for (uint32_t m = std::max(desc.Width, desc.Height); m; m >>= 1) ++mips;
+    uint32_t count = mips * desc.ArraySize;
+    bytes.assign(count, {}); subs.assign(count, D3D11_SUBRESOURCE_DATA{});
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t entry = guest + 12 * i, at = c.mem.r32(entry), pitch = c.mem.r32(entry + 4);
+        uint64_t size = uint64_t(pitch) * d3d11_mip_rows(desc, i % mips);
+        total += size;
+        if (!at || !pitch || total > D3D9_GUEST_SIZE) return E_INVALIDARG;
+        bytes[i] = c.mem.read_bytes(at, uint32_t(size));
+        subs[i].pSysMem = bytes[i].data(); subs[i].SysMemPitch = pitch; subs[i].SysMemSlicePitch = c.mem.r32(entry + 8);
+    }
+    return S_OK;
 }
 // DXGI_SWAP_CHAIN_DESC as the PE32 guest lays it out: 15 DWORDs, 60 bytes, no pointers
 // except OutputWindow (an HWND, mapped to the host window like the D3D9 hDeviceWindow).
@@ -159,6 +219,8 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
     d3d11_iface(s, h, "ID3D11Texture2D", kD3D11ResourceNames, kD3D11ResourceArgc);
     d3d11_iface(s, h, "ID3D11RenderTargetView", kD3D11ViewNames, kD3D11ViewArgc);
     d3d11_iface(s, h, "ID3D11ShaderResourceView", kD3D11ViewNames, kD3D11ViewArgc);
+    d3d11_iface(s, h, "ID3D11DepthStencilView", kD3D11ViewNames, kD3D11ViewArgc);
+    d3d11_iface(s, h, "ID3D11Query", kD3D11QueryNames, kD3D11QueryArgc);
     d3d11_iface(s, h, "ID3D11VertexShader", kD3D11ChildNames, kD3D11ChildArgc);
     d3d11_iface(s, h, "ID3D11PixelShader", kD3D11ChildNames, kD3D11ChildArgc);
     d3d11_iface(s, h, "ID3D11InputLayout", kD3D11ChildNames, kD3D11ChildArgc);
@@ -191,6 +253,22 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
     s.method("IDXGISwapChain", 13, 6, [](Proxy& p, Cpu& c) -> uint32_t {
         return uint32_t(d3d11_as<IDXGISwapChain>(p.host)->ResizeBuffers(c.arg(1), c.arg(2), c.arg(3), DXGI_FORMAT(c.arg(4)), c.arg(5)));
     });
+    // IDXGIOutput has no guest proxy, so a target output cannot cross: only the default (null) one.
+    s.method("IDXGISwapChain", 10, 3, [&h](Proxy& p, Cpu& c) -> uint32_t {
+        if (c.arg(2)) return d3d11_unbridged(h, p, "SetFullscreenState target output");
+        return uint32_t(d3d11_as<IDXGISwapChain>(p.host)->SetFullscreenState(c.arg(1), nullptr));
+    });
+    s.method("IDXGISwapChain", 11, 3, [](Proxy& p, Cpu& c) -> uint32_t {
+        BOOL fullscreen = FALSE;
+        HRESULT hr = d3d11_as<IDXGISwapChain>(p.host)->GetFullscreenState(c.arg(1) ? &fullscreen : nullptr, nullptr);
+        if (SUCCEEDED(hr)) { if (c.arg(1)) c.mem.w32(c.arg(1), uint32_t(fullscreen)); if (c.arg(2)) c.mem.w32(c.arg(2), 0); }
+        return uint32_t(hr);
+    });
+    s.method("IDXGISwapChain", 14, 2, [](Proxy& p, Cpu& c) -> uint32_t {
+        if (!c.arg(1)) return uint32_t(E_POINTER);
+        DXGI_MODE_DESC mode = d3d9_read_struct<DXGI_MODE_DESC>(c, c.arg(1));
+        return uint32_t(d3d11_as<IDXGISwapChain>(p.host)->ResizeTarget(&mode));
+    });
 
     // ---- ID3D11Device creation (the 2D game set) and feature queries
     s.method("ID3D11Device", 3, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
@@ -203,20 +281,13 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         HRESULT hr = d3d11_device(p)->CreateBuffer(&desc, c.arg(2) ? &sub : nullptr, &x);
         return d3d11_out(s, c, c.arg(3), "ID3D11Buffer", hr, x);
     });
-    s.method("ID3D11Device", 5, 4, [&s, &h](Proxy& p, Cpu& c) -> uint32_t {
+    s.method("ID3D11Device", 5, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
         if (!c.arg(1) || !c.arg(3)) return uint32_t(E_POINTER);
         D3D11_TEXTURE2D_DESC desc = d3d9_read_struct<D3D11_TEXTURE2D_DESC>(c, c.arg(1));
-        std::vector<uint8_t> init; D3D11_SUBRESOURCE_DATA sub{};
-        if (c.arg(2)) {
-            // Phase 1 copies one subresource only: a mip chain or array needs every subresource.
-            if (desc.MipLevels != 1 || desc.ArraySize != 1) return d3d11_unbridged(h, p, "CreateTexture2D multi-subresource data");
-            uint32_t pitch = c.mem.r32(c.arg(2) + 4);
-            if (uint64_t(pitch) * desc.Height > D3D9_GUEST_SIZE) return uint32_t(E_INVALIDARG);
-            init = c.mem.read_bytes(c.mem.r32(c.arg(2)), pitch * desc.Height);
-            sub.pSysMem = init.data(); sub.SysMemPitch = pitch;
-        }
+        std::vector<std::vector<uint8_t>> init; std::vector<D3D11_SUBRESOURCE_DATA> subs;
+        if (c.arg(2)) { HRESULT bad = d3d11_read_texture_init(c, c.arg(2), desc, init, subs); if (FAILED(bad)) return uint32_t(bad); }
         ID3D11Texture2D* x = nullptr;
-        HRESULT hr = d3d11_device(p)->CreateTexture2D(&desc, c.arg(2) ? &sub : nullptr, &x);
+        HRESULT hr = d3d11_device(p)->CreateTexture2D(&desc, c.arg(2) ? subs.data() : nullptr, &x);
         return d3d11_out(s, c, c.arg(3), "ID3D11Texture2D", hr, x);
     });
     s.method("ID3D11Device", 7, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
@@ -234,6 +305,14 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         ID3D11RenderTargetView* x = nullptr;
         HRESULT hr = d3d11_device(p)->CreateRenderTargetView(d3d11_obj<ID3D11Resource>(s, c.arg(1)), dp, &x);
         return d3d11_out(s, c, c.arg(3), "ID3D11RenderTargetView", hr, x);
+    });
+    s.method("ID3D11Device", 10, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        if (!c.arg(3)) return uint32_t(E_POINTER);
+        D3D11_DEPTH_STENCIL_VIEW_DESC desc{}; D3D11_DEPTH_STENCIL_VIEW_DESC* dp = nullptr;
+        if (c.arg(2)) { desc = d3d9_read_struct<D3D11_DEPTH_STENCIL_VIEW_DESC>(c, c.arg(2)); dp = &desc; }
+        ID3D11DepthStencilView* x = nullptr;
+        HRESULT hr = d3d11_device(p)->CreateDepthStencilView(d3d11_obj<ID3D11Resource>(s, c.arg(1)), dp, &x);
+        return d3d11_out(s, c, c.arg(3), "ID3D11DepthStencilView", hr, x);
     });
     s.method("ID3D11Device", 11, 6, [&s](Proxy& p, Cpu& c) -> uint32_t {
         // D3D11_INPUT_ELEMENT_DESC is 28 bytes in PE32 (SemanticName is a guest pointer).
@@ -295,6 +374,12 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         ID3D11SamplerState* x = nullptr; HRESULT hr = d3d11_device(p)->CreateSamplerState(&d, &x);
         return d3d11_out(s, c, c.arg(2), "ID3D11SamplerState", hr, x);
     });
+    s.method("ID3D11Device", 24, 3, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        if (!c.arg(1) || !c.arg(2)) return uint32_t(E_POINTER);
+        D3D11_QUERY_DESC desc = d3d9_read_struct<D3D11_QUERY_DESC>(c, c.arg(1));
+        ID3D11Query* x = nullptr; HRESULT hr = d3d11_device(p)->CreateQuery(&desc, &x);
+        return d3d11_out(s, c, c.arg(2), "ID3D11Query", hr, x);
+    });
     s.method("ID3D11Device", 29, 3, [](Proxy& p, Cpu& c) -> uint32_t {
         if (!c.arg(2)) return uint32_t(E_POINTER);
         UINT support = 0;
@@ -302,11 +387,38 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         if (SUCCEEDED(hr)) c.mem.w32(c.arg(2), support);
         return uint32_t(hr);
     });
+    s.method("ID3D11Device", 30, 4, [](Proxy& p, Cpu& c) -> uint32_t {
+        if (!c.arg(3)) return uint32_t(E_POINTER);
+        UINT levels = 0;
+        HRESULT hr = d3d11_device(p)->CheckMultisampleQualityLevels(DXGI_FORMAT(c.arg(1)), c.arg(2), &levels);
+        if (SUCCEEDED(hr)) c.mem.w32(c.arg(3), levels);
+        return uint32_t(hr);
+    });
     s.method("ID3D11Device", 37, 1, [](Proxy& p, Cpu&) -> uint32_t { return uint32_t(d3d11_device(p)->GetFeatureLevel()); });
+    s.method("ID3D11Device", 38, 1, [](Proxy& p, Cpu&) -> uint32_t { return d3d11_device(p)->GetCreationFlags(); });
+    s.method("ID3D11Device", 39, 1, [](Proxy& p, Cpu&) -> uint32_t { return uint32_t(d3d11_device(p)->GetDeviceRemovedReason()); });
     s.method("ID3D11Device", 40, 2, [&s](Proxy& p, Cpu& c) -> uint32_t {
         if (!c.arg(1)) return uint32_t(E_POINTER);
         ID3D11DeviceContext* x = nullptr; d3d11_device(p)->GetImmediateContext(&x);
         return d3d11_out(s, c, c.arg(1), "ID3D11DeviceContext", S_OK, x);
+    });
+
+    // ---- ID3D11Buffer / ID3D11Texture2D: both descriptors are pointer-free DWORDs (24 and 44 bytes)
+    for (const char* iface : {"ID3D11Buffer", "ID3D11Texture2D"})
+        s.method(iface, 7, 2, [](Proxy& p, Cpu& c) -> uint32_t {
+            if (!c.arg(1)) return uint32_t(E_POINTER);
+            D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN; d3d11_as<ID3D11Resource>(p.host)->GetType(&dim);
+            c.mem.w32(c.arg(1), uint32_t(dim)); return 0;
+        });
+    s.method("ID3D11Buffer", 10, 2, [](Proxy& p, Cpu& c) -> uint32_t {
+        if (!c.arg(1)) return uint32_t(E_POINTER);
+        D3D11_BUFFER_DESC d{}; d3d11_as<ID3D11Buffer>(p.host)->GetDesc(&d);
+        c.mem.write_bytes(c.arg(1), &d, sizeof d); return 0;
+    });
+    s.method("ID3D11Texture2D", 10, 2, [](Proxy& p, Cpu& c) -> uint32_t {
+        if (!c.arg(1)) return uint32_t(E_POINTER);
+        D3D11_TEXTURE2D_DESC d{}; d3d11_as<ID3D11Texture2D>(p.host)->GetDesc(&d);
+        c.mem.write_bytes(c.arg(1), &d, sizeof d); return 0;
     });
 
     // ---- ID3D11DeviceContext: the draw path (state binds, uploads, clears, draws)
@@ -349,8 +461,15 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         uint32_t size = d3d11_subresource_bytes(resource, c.arg(2), m.RowPitch);
         if (!size || !m.pData) { d3d11_context(p)->Unmap(resource, c.arg(2)); return d3d11_unbridged(h, p, "Map resource type"); }
         uint32_t at = d3d9_guest_buffer(h, c, size);
-        c.mem.write_bytes(at, m.pData, size);
-        h.d3d9_locks[{c.arg(1), c.arg(2)}] = {m.pData, size, at};
+        // The mode is the lock record. READ and READ_WRITE copy host -> guest here (the scratch is
+        // otherwise fresh and zeroed), so a write-only map never reads the host's possibly
+        // write-combined memory. WRITE modes and READ_WRITE keep the host pointer, which makes
+        // Unmap copy guest -> host; READ records a null host pointer, so Unmap writes nothing back.
+        // A WRITE/NO_OVERWRITE map therefore writes back the whole scratch, zeros where the guest
+        // stored nothing; only DISCARD (contents undefined) is exact for partial writes.
+        const uint32_t mode = c.arg(3);
+        if (mode == D3D11_MAP_READ || mode == D3D11_MAP_READ_WRITE) c.mem.write_bytes(at, m.pData, size);
+        h.d3d9_locks[{c.arg(1), c.arg(2)}] = {mode == D3D11_MAP_READ ? nullptr : m.pData, size, at};
         c.mem.w32(c.arg(5), at); c.mem.w32(c.arg(5) + 4, m.RowPitch); c.mem.w32(c.arg(5) + 8, m.DepthPitch);
         return uint32_t(hr);
     });
@@ -380,11 +499,10 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         d3d11_context(p)->IASetIndexBuffer(d3d11_obj<ID3D11Buffer>(s, c.arg(1)), DXGI_FORMAT(c.arg(2)), c.arg(3)); return 0;
     });
     s.method("ID3D11DeviceContext", 24, 2, [](Proxy& p, Cpu& c) -> uint32_t { d3d11_context(p)->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY(c.arg(1))); return 0; });
-    s.method("ID3D11DeviceContext", 33, 4, [&s, &h](Proxy& p, Cpu& c) -> uint32_t {
+    s.method("ID3D11DeviceContext", 33, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
         std::vector<ID3D11RenderTargetView*> targets;
         if (!d3d11_objects(s, c, c.arg(2), c.arg(1), targets, 8)) return uint32_t(E_INVALIDARG);
-        if (c.arg(3)) return d3d11_unbridged(h, p, "OMSetRenderTargets depth-stencil view");
-        d3d11_context(p)->OMSetRenderTargets(c.arg(1), targets.data(), nullptr); return 0;
+        d3d11_context(p)->OMSetRenderTargets(c.arg(1), targets.data(), d3d11_obj<ID3D11DepthStencilView>(s, c.arg(3))); return 0;
     });
     s.method("ID3D11DeviceContext", 35, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
         float factor[4]{1, 1, 1, 1};
@@ -407,13 +525,15 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         for (uint32_t i = 0; i < c.arg(1); ++i) rects[i] = d3d9_read_struct<RECT>(c, c.arg(2) + i * sizeof(D3D11_RECT));
         d3d11_context(p)->RSSetScissorRects(c.arg(1), rects.data()); return 0;
     });
-    s.method("ID3D11DeviceContext", 48, 7, [&s, &h](Proxy& p, Cpu& c) -> uint32_t {
-        if (c.arg(3)) return d3d11_unbridged(h, p, "UpdateSubresource destination box");
+    s.method("ID3D11DeviceContext", 48, 7, [&s](Proxy& p, Cpu& c) -> uint32_t {
         ID3D11Resource* dst = d3d11_obj<ID3D11Resource>(s, c.arg(1));
-        uint32_t size = dst ? d3d11_subresource_bytes(dst, c.arg(2), c.arg(5)) : 0;
-        if (!c.arg(4) || !size) return uint32_t(E_INVALIDARG);
-        std::vector<uint8_t> data = c.mem.read_bytes(c.arg(4), size);
-        d3d11_context(p)->UpdateSubresource(dst, c.arg(2), nullptr, data.data(), c.arg(5), c.arg(6)); return 0;
+        D3D11_BOX box{}; const D3D11_BOX* region = nullptr;
+        if (c.arg(3)) { box = d3d9_read_struct<D3D11_BOX>(c, c.arg(3)); region = &box; }
+        int64_t size = dst && c.arg(4) ? d3d11_update_bytes(dst, c.arg(2), region, c.arg(5)) : -1;
+        if (size < 0) return uint32_t(E_INVALIDARG);
+        if (size == 0) return 0;
+        std::vector<uint8_t> data = c.mem.read_bytes(c.arg(4), uint32_t(size));
+        d3d11_context(p)->UpdateSubresource(dst, c.arg(2), region, data.data(), c.arg(5), c.arg(6)); return 0;
     });
     s.method("ID3D11DeviceContext", 50, 3, [&s](Proxy& p, Cpu& c) -> uint32_t {
         if (!c.arg(2)) return uint32_t(E_POINTER);
@@ -422,6 +542,81 @@ inline void register_d3d11_com(ComSpace& s, Host& h) {
         d3d11_context(p)->ClearRenderTargetView(d3d11_obj<ID3D11RenderTargetView>(s, c.arg(1)), color);
         return 0;
     });
+    // Depth is a float and Stencil a UINT8, each passed in a 4-byte stack slot.
+    s.method("ID3D11DeviceContext", 53, 5, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        ID3D11DepthStencilView* view = d3d11_obj<ID3D11DepthStencilView>(s, c.arg(1));
+        if (!view) return uint32_t(E_POINTER);
+        float depth; uint32_t bits = c.arg(3); memcpy(&depth, &bits, sizeof depth);
+        d3d11_context(p)->ClearDepthStencilView(view, c.arg(2), depth, uint8_t(c.arg(4) & 0xFF));
+        return 0;
+    });
+
+    // ---- ID3D11DeviceContext: instancing, vertex-stage binds, queries, copies, state
+    s.method("ID3D11DeviceContext", 20, 6, [](Proxy& p, Cpu& c) -> uint32_t {
+        d3d11_context(p)->DrawIndexedInstanced(c.arg(1), c.arg(2), c.arg(3), int32_t(c.arg(4)), c.arg(5)); return 0;
+    });
+    s.method("ID3D11DeviceContext", 21, 5, [](Proxy& p, Cpu& c) -> uint32_t {
+        d3d11_context(p)->DrawInstanced(c.arg(1), c.arg(2), c.arg(3), c.arg(4)); return 0;
+    });
+    s.method("ID3D11DeviceContext", 25, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        std::vector<ID3D11ShaderResourceView*> views;
+        if (!d3d11_objects(s, c, c.arg(3), c.arg(2), views, 128)) return uint32_t(E_INVALIDARG);
+        d3d11_context(p)->VSSetShaderResources(c.arg(1), c.arg(2), views.data()); return 0;
+    });
+    s.method("ID3D11DeviceContext", 26, 4, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        std::vector<ID3D11SamplerState*> samplers;
+        if (!d3d11_objects(s, c, c.arg(3), c.arg(2), samplers, 16)) return uint32_t(E_INVALIDARG);
+        d3d11_context(p)->VSSetSamplers(c.arg(1), c.arg(2), samplers.data()); return 0;
+    });
+    s.method("ID3D11DeviceContext", 27, 2, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        ID3D11Asynchronous* async = d3d11_obj<ID3D11Asynchronous>(s, c.arg(1));
+        if (!async) return uint32_t(E_POINTER);
+        d3d11_context(p)->Begin(async); return 0;
+    });
+    s.method("ID3D11DeviceContext", 28, 2, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        ID3D11Asynchronous* async = d3d11_obj<ID3D11Asynchronous>(s, c.arg(1));
+        if (!async) return uint32_t(E_POINTER);
+        d3d11_context(p)->End(async); return 0;
+    });
+    // GetData: S_FALSE (not ready) crosses unchanged and writes nothing; query results are
+    // small (the largest, pipeline statistics, is 88 bytes), so a big DataSize is invalid.
+    s.method("ID3D11DeviceContext", 29, 5, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        ID3D11Asynchronous* async = d3d11_obj<ID3D11Asynchronous>(s, c.arg(1));
+        if (!async) return uint32_t(E_POINTER);
+        uint32_t size = c.arg(3);
+        if (size > 4096) return uint32_t(E_INVALIDARG);
+        std::vector<uint8_t> data(c.arg(2) ? size : 0);
+        HRESULT hr = d3d11_context(p)->GetData(async, c.arg(2) ? data.data() : nullptr, size, c.arg(4));
+        if (hr == S_OK && !data.empty()) c.mem.write_bytes(c.arg(2), data.data(), uint32_t(data.size()));
+        return uint32_t(hr);
+    });
+    s.method("ID3D11DeviceContext", 46, 9, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        ID3D11Resource* dst = d3d11_obj<ID3D11Resource>(s, c.arg(1));
+        ID3D11Resource* src = d3d11_obj<ID3D11Resource>(s, c.arg(6));
+        if (!dst || !src) return uint32_t(E_POINTER);
+        D3D11_BOX box{}; const D3D11_BOX* region = nullptr;
+        if (c.arg(8)) { box = d3d9_read_struct<D3D11_BOX>(c, c.arg(8)); region = &box; }
+        d3d11_context(p)->CopySubresourceRegion(dst, c.arg(2), c.arg(3), c.arg(4), c.arg(5), src, c.arg(7), region); return 0;
+    });
+    s.method("ID3D11DeviceContext", 47, 3, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        ID3D11Resource* dst = d3d11_obj<ID3D11Resource>(s, c.arg(1));
+        ID3D11Resource* src = d3d11_obj<ID3D11Resource>(s, c.arg(2));
+        if (!dst || !src) return uint32_t(E_POINTER);
+        d3d11_context(p)->CopyResource(dst, src); return 0;
+    });
+    s.method("ID3D11DeviceContext", 54, 2, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        ID3D11ShaderResourceView* view = d3d11_obj<ID3D11ShaderResourceView>(s, c.arg(1));
+        if (!view) return uint32_t(E_POINTER);
+        d3d11_context(p)->GenerateMips(view); return 0;
+    });
+    s.method("ID3D11DeviceContext", 57, 6, [&s](Proxy& p, Cpu& c) -> uint32_t {
+        ID3D11Resource* dst = d3d11_obj<ID3D11Resource>(s, c.arg(1));
+        ID3D11Resource* src = d3d11_obj<ID3D11Resource>(s, c.arg(3));
+        if (!dst || !src) return uint32_t(E_POINTER);
+        d3d11_context(p)->ResolveSubresource(dst, c.arg(2), src, c.arg(4), DXGI_FORMAT(c.arg(5))); return 0;
+    });
+    s.method("ID3D11DeviceContext", 110, 1, [](Proxy& p, Cpu&) -> uint32_t { d3d11_context(p)->ClearState(); return 0; });
+    s.method("ID3D11DeviceContext", 111, 1, [](Proxy& p, Cpu&) -> uint32_t { d3d11_context(p)->Flush(); return 0; });
 }
 inline void register_d3d11(Registry& r, Host& h) {
     register_d3d11_com(h.com, h);

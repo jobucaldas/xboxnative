@@ -123,4 +123,41 @@ ARGC_CHECK(ID3D11DeviceContextVtbl,ClearState,1,"ClearState argc");
 static_assert(SLOT(ID3D11DeviceContextVtbl,FinishCommandList)==114,"FinishCommandList");
 ARGC_CHECK(ID3D11DeviceContextVtbl,FinishCommandList,3,"FinishCommandList argc");
 
+// ---- Phase 2: one line proves a slot (offsetof) and its argument count (i686 only).
+#define PROVE(vtbl,method,slot,argc) static_assert(SLOT(vtbl,method)==slot,#vtbl "::" #method); ARGC_CHECK(vtbl,method,argc,#vtbl "::" #method " argc")
+PROVE(IDXGISwapChainVtbl,SetFullscreenState,10,3);
+PROVE(IDXGISwapChainVtbl,GetFullscreenState,11,3);
+PROVE(IDXGISwapChainVtbl,ResizeTarget,14,2);
+PROVE(ID3D11DeviceVtbl,CreateDepthStencilView,10,4);
+PROVE(ID3D11DeviceVtbl,CreateQuery,24,3);
+PROVE(ID3D11DeviceVtbl,CheckMultisampleQualityLevels,30,4);
+PROVE(ID3D11DeviceVtbl,GetCreationFlags,38,1);
+PROVE(ID3D11DeviceVtbl,GetDeviceRemovedReason,39,1);
+PROVE(ID3D11DeviceContextVtbl,DrawIndexedInstanced,20,6);
+PROVE(ID3D11DeviceContextVtbl,DrawInstanced,21,5);
+PROVE(ID3D11DeviceContextVtbl,VSSetShaderResources,25,4);
+PROVE(ID3D11DeviceContextVtbl,VSSetSamplers,26,4);
+PROVE(ID3D11DeviceContextVtbl,Begin,27,2);
+PROVE(ID3D11DeviceContextVtbl,End,28,2);
+PROVE(ID3D11DeviceContextVtbl,GetData,29,5);
+PROVE(ID3D11DeviceContextVtbl,CopySubresourceRegion,46,9);
+PROVE(ID3D11DeviceContextVtbl,CopyResource,47,3);
+PROVE(ID3D11DeviceContextVtbl,ClearDepthStencilView,53,5);
+PROVE(ID3D11DeviceContextVtbl,GenerateMips,54,2);
+PROVE(ID3D11DeviceContextVtbl,ResolveSubresource,57,6);
+PROVE(ID3D11DeviceContextVtbl,Flush,111,1);
+// ID3D11Buffer and ID3D11Texture2D share the ID3D11Resource layout.
+PROVE(ID3D11BufferVtbl,GetType,7,2);
+PROVE(ID3D11BufferVtbl,GetDesc,10,2);
+PROVE(ID3D11Texture2DVtbl,GetType,7,2);
+PROVE(ID3D11Texture2DVtbl,GetDesc,10,2);
+// ID3D11Query is a DeviceChild (0-6) + Asynchronous::GetDataSize + Query::GetDesc: nine slots.
+PROVE(ID3D11QueryVtbl,GetDataSize,7,1);
+PROVE(ID3D11QueryVtbl,GetDesc,8,2);
+static_assert(sizeof(ID3D11QueryVtbl)==9*sizeof(void*),"ID3D11Query has nine slots");
+// ID3D11DepthStencilView is a View: GetResource 7, GetDesc 8.
+PROVE(ID3D11DepthStencilViewVtbl,GetResource,7,2);
+PROVE(ID3D11DepthStencilViewVtbl,GetDesc,8,2);
+static_assert(sizeof(ID3D11DepthStencilViewVtbl)==9*sizeof(void*),"ID3D11DepthStencilView has nine slots");
+
 int main() { return 0; }
