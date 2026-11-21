@@ -21,6 +21,37 @@ struct D3D11CreateArgs {
     void* swapchain = nullptr; void* device = nullptr; void* context = nullptr;
     uint32_t feature_level = 0;
 };
+// Maps each OpenGL 4.6 buffer binding target to its glGetIntegerv binding query enum (0 if unknown).
+inline uint32_t gl_buffer_binding_pname(uint32_t target) {
+    switch (target) {
+        case 0x8892u: return 0x8894u; // GL_ARRAY_BUFFER -> GL_ARRAY_BUFFER_BINDING
+        case 0x8893u: return 0x8895u; // GL_ELEMENT_ARRAY_BUFFER -> GL_ELEMENT_ARRAY_BUFFER_BINDING
+        case 0x88EBu: return 0x88EDu; // GL_PIXEL_PACK_BUFFER -> GL_PIXEL_PACK_BUFFER_BINDING
+        case 0x88ECu: return 0x88EFu; // GL_PIXEL_UNPACK_BUFFER -> GL_PIXEL_UNPACK_BUFFER_BINDING
+        case 0x8A11u: return 0x8A28u; // GL_UNIFORM_BUFFER -> GL_UNIFORM_BUFFER_BINDING
+        case 0x8C8Eu: return 0x8C8Fu; // GL_TRANSFORM_FEEDBACK_BUFFER -> GL_TRANSFORM_FEEDBACK_BUFFER_BINDING
+        case 0x8F36u: return 0x8F36u; // GL_COPY_READ_BUFFER -> GL_COPY_READ_BUFFER_BINDING
+        case 0x8F37u: return 0x8F37u; // GL_COPY_WRITE_BUFFER -> GL_COPY_WRITE_BUFFER_BINDING
+        case 0x8C2Au: return 0x8C2Au; // GL_TEXTURE_BUFFER -> GL_TEXTURE_BUFFER_BINDING
+        case 0x8F3Fu: return 0x8F43u; // GL_DRAW_INDIRECT_BUFFER -> GL_DRAW_INDIRECT_BUFFER_BINDING
+        case 0x92C0u: return 0x92C1u; // GL_ATOMIC_COUNTER_BUFFER -> GL_ATOMIC_COUNTER_BUFFER_BINDING
+        case 0x90D2u: return 0x90D3u; // GL_SHADER_STORAGE_BUFFER -> GL_SHADER_STORAGE_BUFFER_BINDING
+        case 0x90EEu: return 0x90EFu; // GL_DISPATCH_INDIRECT_BUFFER -> GL_DISPATCH_INDIRECT_BUFFER_BINDING
+        case 0x9192u: return 0x9193u; // GL_QUERY_BUFFER -> GL_QUERY_BUFFER_BINDING
+        case 0x80EEu: return 0x80EFu; // GL_PARAMETER_BUFFER -> GL_PARAMETER_BUFFER_BINDING
+        default: return 0u;
+    }
+}
+inline bool gl_is_indexed_buffer_target(uint32_t target) {
+    return target == 0x8A11u || target == 0x8C8Eu || target == 0x90D2u || target == 0x92C0u;
+}
+template <class GetIntegerv>
+inline bool gl_verify_host_binding(GetIntegerv&& get_integerv, uint32_t pname, uint32_t expected) {
+    if (!pname) return false;
+    int bound = expected ? 0 : 1;
+    get_integerv(pname, &bound);
+    return uint32_t(bound) == expected;
+}
 struct Host {
     enum class NlsOperation { IsValidCodePage, GetCPInfo, MultiByteToWideChar, WideCharToMultiByte,
         GetStringTypeA, GetStringTypeW, GetStringTypeExW, GetLocaleInfoA, GetLocaleInfoW, GetLocaleInfoEx, GetUserDefaultLocaleName,
@@ -71,13 +102,16 @@ struct Host {
         std::vector<GlArgKind> arg_kinds;
         std::vector<unsigned> arg_slots;
         unsigned short signature = 65535;
+        GlReturnKind return_kind = GlReturnKind::Void;
         std::vector<PointerBuffer> pointers;
         std::vector<std::vector<uint8_t>> shader_sources;
         std::vector<int32_t> shader_lengths;
         std::vector<uint8_t> input, output;
         uintptr_t result = 0;
         uint32_t last_error = 0;
+        uint32_t buffer = 0; // guest buffer id the call expects bound to its target (map/unmap)
         bool gap = false;
+        bool rejected = false; // host GL raised an error for a bind call; shadow state must not change
     };
     struct WindowCreate {
         std::u16string class_name, title;
@@ -108,7 +142,7 @@ struct Host {
         std::vector<uint8_t> data;
         uint32_t status = 120;
     };
-    struct GlMap { uint32_t address = 0, size = 0, target = 0; uintptr_t offset = 0; bool writable = false; };
+    struct GlMap { uint32_t address = 0, size = 0, buffer = 0; uintptr_t offset = 0; bool writable = false; };
     std::string out, err;                         // captured stdout/stderr bytes
     std::function<void(const std::string&)> tee;  // optional live sink
     std::function<NlsResponse(const NlsRequest&)> nls_call;
@@ -141,10 +175,15 @@ struct Host {
     std::map<uint32_t, std::map<int32_t, uint32_t>> window_longs;
     std::map<uint32_t, std::u16string> window_class_atoms;
     std::map<std::pair<uint32_t, std::u16string>, uint32_t> window_properties;
+    std::map<uint32_t, uint32_t> gl_bound_buffers;
+    std::map<uint32_t, uint32_t> gl_vao_element_buffers;
+    uint32_t gl_bound_vao = 0;
     std::map<uint32_t, GlMap> gl_maps;
+    std::map<std::string, uint32_t> gl_strings;
     std::vector<Timer> timers;
     uint32_t next_timer_id = 1;
     uint32_t window_class_serial = 0xC000u, gl_handle_serial = 0xE0000000u, window_handle_serial = 0xD0000000u, user_handle_serial = 0xC0000000u, gl_map_next = 0x70000000u;
+    uint32_t gl_string_cursor = 0, gl_string_end = 0, gl_string_next = 0x76000000u;
     uint32_t vertex_array = 0, gl_array_buffer = 0, gl_element_array_buffer = 0;
     std::function<uintptr_t(bool, uint32_t, uintptr_t*)> d3d9_factory;
     std::function<uintptr_t(const void*, uintptr_t*)> dsound_factory;
@@ -1052,27 +1091,105 @@ inline void register_gl(Registry& r, Host& h) {
         if (it == r.map.end()) return 0;
         return c.thunks.add(it->second);
     });
+    auto intern_gl_string = [&h](Cpu& c, const std::string& text) -> uint32_t {
+        const size_t need = text.size() + 1;
+        if (need > (1u << 20)) return 0;
+        auto it = h.gl_strings.find(text);
+        if (it != h.gl_strings.end() && c.mem.range_accessible(it->second, uint32_t(need), PROT_R)) return it->second;
+        uint32_t addr = 0;
+        if (h.gl_string_cursor && uint64_t(h.gl_string_cursor) + need <= h.gl_string_end &&
+            c.mem.range_accessible(h.gl_string_cursor, uint32_t(need), PROT_R)) {
+            addr = h.gl_string_cursor;
+            h.gl_string_cursor += uint32_t(need);
+        } else {
+            const uint32_t alloc_size = uint32_t((need + Memory::PAGE - 1) & ~(size_t(Memory::PAGE) - 1));
+            uint32_t candidate = (h.gl_string_next + Memory::PAGE - 1) & ~(Memory::PAGE - 1);
+            if (candidate < 0x70000000u || candidate >= 0xF0000000u) candidate = 0x70000000u;
+            bool found = false;
+            for (unsigned attempt = 0; attempt < 4096; ++attempt) {
+                if (c.mem.free_range(candidate, alloc_size)) { found = true; break; }
+                candidate += alloc_size;
+                if (candidate < 0x70000000u || candidate >= 0xF0000000u) candidate = 0x70000000u;
+            }
+            if (!found) return 0;
+            c.mem.map(candidate, alloc_size, PROT_R);
+            addr = candidate;
+            h.gl_string_next = candidate + alloc_size;
+            const uint32_t remaining = alloc_size - uint32_t(need);
+            if (!h.gl_string_cursor || remaining > h.gl_string_end - h.gl_string_cursor) {
+                h.gl_string_cursor = candidate + uint32_t(need);
+                h.gl_string_end = candidate + alloc_size;
+            }
+        }
+        const uint32_t page_base = addr & ~(Memory::PAGE - 1);
+        const uint32_t page_end = uint32_t((uint64_t(addr) + need + Memory::PAGE - 1) & ~uint64_t(Memory::PAGE - 1));
+        c.mem.protect(page_base, page_end - page_base, PROT_R | PROT_W);
+        if (!text.empty()) c.mem.write_bytes(addr, text.data(), uint32_t(text.size()));
+        c.mem.w8(addr + uint32_t(text.size()), 0);
+        c.mem.protect(page_base, page_end - page_base, PROT_R);
+        h.gl_strings[text] = addr;
+        return addr;
+    };
     for (unsigned export_index = 0; export_index < sizeof(kGlExports) / sizeof(kGlExports[0]); ++export_index) {
         const auto& exported = kGlExports[export_index];
         const unsigned short signature = kGlSignatureIds[export_index];
+        const GlReturnKind return_kind = kGlReturnKinds[export_index];
         const std::string name = exported.name;
         const unsigned argc = exported.argc;
         const unsigned first_arg = exported.first_arg;
         const unsigned arg_count = exported.arg_count;
-        r.add("opengl32.dll", name, Conv::Stdcall, argc, [&h, call, count, name, argc, first_arg, arg_count, signature](Cpu& c) -> uint32_t {
-            count(name); Host::GlCall q{}; q.name = name; q.signature = signature;
+        r.add("opengl32.dll", name, Conv::Stdcall, argc, [&h, call, count, intern_gl_string, name, argc, first_arg, arg_count, signature, return_kind](Cpu& c) -> uint32_t {
+            count(name); Host::GlCall q{}; q.name = name; q.signature = signature; q.return_kind = return_kind;
             for (unsigned i = 0; i < argc; ++i) q.args.push_back(c.arg(i));
+            bool has_unsupported_arg = false;
             for (unsigned i = 0; i < arg_count; ++i) {
-                q.arg_kinds.push_back(kGlArgs[first_arg + i].kind);
+                const GlArgKind kind = kGlArgs[first_arg + i].kind;
+                q.arg_kinds.push_back(kind);
                 q.arg_slots.push_back(kGlArgs[first_arg + i].slots);
+                has_unsupported_arg = has_unsupported_arg || kind == GlArgKind::Unsupported;
             }
-            if (name == "glMapBufferRange" || name == "glMapBuffer") {
+            if (name == "glGetString" || name == "glGetStringi") {
+                if (!call(c, q) || q.gap) return 0;
+                if (q.output.empty()) {
+                    if (q.result) { q.gap = true; call(c, q); }
+                    return 0;
+                }
+                size_t len = 0;
+                while (len < q.output.size() && q.output[len] != 0) ++len;
+                if (len >= (1u << 20)) { q.gap = true; call(c, q); return 0; }
+                const uint32_t guest_str = intern_gl_string(c, std::string(reinterpret_cast<const char*>(q.output.data()), len));
+                if (!guest_str) { q.gap = true; call(c, q); return 0; }
+                return guest_str;
+            }
+            auto bound_buffer = [&h](uint32_t target) -> uint32_t {
+                auto it = h.gl_bound_buffers.find(target);
+                return it == h.gl_bound_buffers.end() ? 0u : it->second;
+            };
+            // GL_ELEMENT_ARRAY_BUFFER binding is VAO state: switching VAOs swaps the shadow binding.
+            auto switch_vao = [&h](uint32_t vao) {
+                h.gl_bound_vao = vao;
+                auto it = h.gl_vao_element_buffers.find(vao);
+                h.gl_element_array_buffer = it == h.gl_vao_element_buffers.end() ? 0u : it->second;
+                if (h.gl_element_array_buffer) h.gl_bound_buffers[0x8893u] = h.gl_element_array_buffer;
+                else h.gl_bound_buffers.erase(0x8893u);
+            };
+            if (name == "glMapBufferRange" || name == "glMapBuffer" || name == "glMapBufferARB") {
                 const uint32_t target = uint32_t(q.args[0]);
-                const uint32_t size = name == "glMapBufferRange" ? uint32_t(q.args[2]) : 0;
-                const uint32_t access = uint32_t(q.args[name == "glMapBufferRange" ? 3 : 1]);
-                if (h.gl_maps.count(target) || (name == "glMapBufferRange" && (!size || size > (1u << 26)))) {
+                const bool is_range = name == "glMapBufferRange";
+                const int32_t range_offset = is_range ? int32_t(q.args[1]) : 0;
+                const uint32_t size = is_range ? uint32_t(q.args[2]) : 0;
+                const uint32_t access = uint32_t(q.args[is_range ? 3 : 1]);
+                const uint32_t buffer = bound_buffer(target);
+                const bool access_ok = is_range
+                    ? ((access & 0x3u) != 0 && (access & ~0x3Fu) == 0 &&
+                       !((access & 0x1u) && (access & 0x2Cu)) &&  // READ excludes INVALIDATE_RANGE/BUFFER and UNSYNCHRONIZED
+                       !((access & 0x10u) && !(access & 0x2u)))   // FLUSH_EXPLICIT requires WRITE
+                    : (access == 0x88B8u || access == 0x88B9u || access == 0x88BAu);
+                if (!buffer || !access_ok || h.gl_maps.count(buffer) ||
+                    (is_range && (range_offset < 0 || !size || size > (1u << 26)))) {
                     c.mem.w32(c.fs_base + 0x34, 87); return 0;
                 }
+                q.buffer = buffer;
                 if (!call(c, q) || q.gap || q.output.empty() || (size && q.output.size() != size) || q.output.size() > (1u << 26)) return 0;
                 uint32_t address = (h.gl_map_next + Memory::PAGE - 1) & ~(Memory::PAGE - 1);
                 bool found = false;
@@ -1085,24 +1202,60 @@ inline void register_gl(Registry& r, Host& h) {
                 const uint32_t map_size = uint32_t(q.output.size());
                 c.mem.map(address, map_size, PROT_R | PROT_W);
                 c.mem.write_bytes(address, q.output.data(), map_size);
-                const uintptr_t offset = name == "glMapBufferRange" ? uintptr_t(q.args[1]) : 0;
-                h.gl_maps[target] = {address, map_size, target, offset, name == "glMapBufferRange" ? (access & 0x2u) != 0 : access != 0x88B8u};
+                const uintptr_t offset = is_range ? uintptr_t(range_offset) : 0;
+                const bool writable = is_range ? (access & 0x2u) != 0 : access != 0x88B8u;
+                h.gl_maps[buffer] = {address, map_size, buffer, offset, writable};
                 h.gl_map_next = address + uint32_t((map_size + Memory::PAGE - 1) & ~(size_t(Memory::PAGE - 1)));
                 return address;
             }
-            if (name == "glUnmapBuffer") {
-                const uint32_t target = uint32_t(q.args[0]); auto it = h.gl_maps.find(target);
+            if (name == "glUnmapBuffer" || name == "glUnmapBufferARB") {
+                const uint32_t target = uint32_t(q.args[0]);
+                const uint32_t buffer = bound_buffer(target);
+                auto it = buffer ? h.gl_maps.find(buffer) : h.gl_maps.end();
                 if (it == h.gl_maps.end()) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
-                Host::GlCall unmap{}; unmap.name = "x86GlUnmapBuffer"; unmap.args = {target, it->second.offset};
+                Host::GlCall unmap{}; unmap.name = "x86GlUnmapBuffer"; unmap.args = {target, it->second.offset}; unmap.buffer = buffer;
                 if (it->second.writable) unmap.input = c.mem.read_bytes(it->second.address, it->second.size);
                 bool ok = call(c, unmap) && !unmap.gap && unmap.result != 0;
+                if (unmap.rejected) { c.mem.w32(c.fs_base + 0x34, 87); return 0; } // host binding mismatch: keep outstanding map intact
                 c.mem.unmap(it->second.address, it->second.size); h.gl_maps.erase(it);
                 return ok ? 1u : 0u;
             }
-            if (name == "glBindBuffer" && q.args.size() == 2 && (q.args[0] == 0x8892u || q.args[0] == 0x8893u)) {
+            if (return_kind == GlReturnKind::Pointer || has_unsupported_arg) {
+                // Unbridged pointer-returning calls and pointer-to-pointer out-params must
+                // fail closed instead of handing a truncated 64-bit host address to the guest.
+                q.gap = true; call(c, q); return 0;
+            }
+            if ((name == "glBindBuffer" || name == "glBindBufferARB") && q.args.size() == 2) {
                 if (!call(c, q) || q.gap) return 0;
-                if (q.args[0] == 0x8892u) h.gl_array_buffer = uint32_t(q.args[1]);
-                else h.gl_element_array_buffer = uint32_t(q.args[1]);
+                const uint32_t target = uint32_t(q.args[0]), buffer = uint32_t(q.args[1]);
+                if (buffer) h.gl_bound_buffers[target] = buffer;
+                else h.gl_bound_buffers.erase(target);
+                if (target == 0x8892u) h.gl_array_buffer = buffer;
+                else if (target == 0x8893u) {
+                    h.gl_element_array_buffer = buffer;
+                    if (buffer) h.gl_vao_element_buffers[h.gl_bound_vao] = buffer;
+                    else h.gl_vao_element_buffers.erase(h.gl_bound_vao);
+                }
+                return uint32_t(q.result);
+            }
+            if ((name == "glBindVertexArray" || name == "glBindVertexArrayAPPLE") && q.args.size() == 1) {
+                if (!call(c, q) || q.gap) return 0;
+                if (!q.rejected) switch_vao(uint32_t(q.args[0]));
+                return uint32_t(q.result);
+            }
+            if ((name == "glBindBufferBase" || name == "glBindBufferBaseEXT" || name == "glBindBufferRange" ||
+                 name == "glBindBufferRangeEXT" || name == "glBindBufferOffsetEXT") && q.args.size() >= 3) {
+                const bool is_range = name == "glBindBufferRange" || name == "glBindBufferRangeEXT";
+                const bool is_offset = name == "glBindBufferOffsetEXT";
+                if (q.args[2] && ((is_range && (q.args.size() < 5 || int32_t(q.args[3]) < 0 || int32_t(q.args[4]) <= 0)) ||
+                                  (is_offset && (q.args.size() < 4 || int32_t(q.args[3]) < 0)))) {
+                    c.mem.w32(c.fs_base + 0x34, 87); return 0; // invalid range: not forwarded, shadow binding untouched
+                }
+                if (!call(c, q) || q.gap) return 0;
+                if (q.rejected) return 0; // host raised a GL error: the previous binding is still current
+                const uint32_t target = uint32_t(q.args[0]), buffer = uint32_t(q.args[2]);
+                if (buffer) h.gl_bound_buffers[target] = buffer;
+                else h.gl_bound_buffers.erase(target);
                 return uint32_t(q.result);
             }
             if (name == "glVertexPointer") {
@@ -1318,10 +1471,39 @@ inline void register_gl(Registry& r, Host& h) {
                 return uint32_t(q.result);
             }
             if (!call(c, q)) return 0;
+            if (!q.gap && (name == "glDeleteBuffers" || name == "glDeleteBuffersARB") && !q.pointers.empty()) {
+                const auto& bytes = q.pointers[0].bytes;
+                for (size_t off = 0; off + 4 <= bytes.size(); off += 4) {
+                    uint32_t id = 0; std::memcpy(&id, bytes.data() + off, 4);
+                    if (!id) continue;
+                    for (auto it = h.gl_bound_buffers.begin(); it != h.gl_bound_buffers.end(); ) {
+                        if (it->second == id) it = h.gl_bound_buffers.erase(it);
+                        else ++it;
+                    }
+                    if (h.gl_array_buffer == id) h.gl_array_buffer = 0;
+                    if (h.gl_element_array_buffer == id) h.gl_element_array_buffer = 0;
+                    auto vao_it = h.gl_vao_element_buffers.find(h.gl_bound_vao);
+                    if (vao_it != h.gl_vao_element_buffers.end() && vao_it->second == id) h.gl_vao_element_buffers.erase(vao_it);
+                    auto map_it = h.gl_maps.find(id);
+                    if (map_it != h.gl_maps.end()) {
+                        c.mem.unmap(map_it->second.address, map_it->second.size);
+                        h.gl_maps.erase(map_it);
+                    }
+                }
+            }
+            if (!q.gap && (name == "glDeleteVertexArrays" || name == "glDeleteVertexArraysAPPLE") && !q.pointers.empty()) {
+                const auto& bytes = q.pointers[0].bytes;
+                for (size_t off = 0; off + 4 <= bytes.size(); off += 4) {
+                    uint32_t id = 0; std::memcpy(&id, bytes.data() + off, 4);
+                    if (!id) continue;
+                    h.gl_vao_element_buffers.erase(id);
+                    if (h.gl_bound_vao == id) switch_vao(0);
+                }
+            }
             if (!q.gap && !q.output.empty() && output_dst) c.mem.write_bytes(output_dst, q.output.data(), uint32_t(q.output.size()));
             if (!q.gap) for (const auto& pointer_buffer : q.pointers) if (pointer_buffer.output && !pointer_buffer.bytes.empty())
                 c.mem.write_bytes(pointer_buffer.guest_address, pointer_buffer.bytes.data(), uint32_t(pointer_buffer.bytes.size()));
-            return uint32_t(q.result);
+            return q.gap ? 0u : uint32_t(q.result);
         });
     }
     // WGL entry points also participate in GetProcAddress dispatch.

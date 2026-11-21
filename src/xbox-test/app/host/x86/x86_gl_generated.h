@@ -6,6 +6,7 @@
 #include <type_traits>
 namespace x86 {
 enum class GlArgKind : unsigned char { Scalar, Float, Double, Int64, Pointer, OutputPointer, Unsupported };
+enum class GlReturnKind : unsigned char { Void, Scalar, Float, Double, Int64, Pointer };
 struct GlArg { const char* name; GlArgKind kind; unsigned slots; const char* length; };
 struct GlExport { const char* name; unsigned argc; unsigned first_arg; unsigned arg_count; };
 inline float gl_arg_float(uintptr_t word) { uint32_t bits = uint32_t(word); float value; std::memcpy(&value, &bits, sizeof(value)); return value; }
@@ -1773,10 +1774,10 @@ inline constexpr GlArg kGlArgs[] = {
     {"params", GlArgKind::OutputPointer, 1, "COMPSIZE(pname)"},
     {"target", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"params", GlArgKind::OutputPointer, 1, "1"},
+    {"params", GlArgKind::Unsupported, 1, "1"},
     {"target", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"params", GlArgKind::OutputPointer, 1, "1"},
+    {"params", GlArgKind::Unsupported, 1, "1"},
     {"target", GlArgKind::Scalar, 1, ""},
     {"offset", GlArgKind::Scalar, 1, ""},
     {"size", GlArgKind::Scalar, 1, ""},
@@ -2102,10 +2103,10 @@ inline constexpr GlArg kGlArgs[] = {
     {"params", GlArgKind::OutputPointer, 1, "COMPSIZE(pname)"},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"params", GlArgKind::OutputPointer, 1, "1"},
+    {"params", GlArgKind::Unsupported, 1, "1"},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"params", GlArgKind::OutputPointer, 1, "1"},
+    {"params", GlArgKind::Unsupported, 1, "1"},
     {"buffer", GlArgKind::Scalar, 1, ""},
     {"offset", GlArgKind::Scalar, 1, ""},
     {"size", GlArgKind::Scalar, 1, ""},
@@ -2201,14 +2202,14 @@ inline constexpr GlArg kGlArgs[] = {
     {"params", GlArgKind::OutputPointer, 1, "COMPSIZE(pname)"},
     {"target", GlArgKind::Scalar, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
-    {"data", GlArgKind::OutputPointer, 1, "1"},
+    {"data", GlArgKind::Unsupported, 1, "1"},
     {"pname", GlArgKind::Scalar, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
-    {"params", GlArgKind::OutputPointer, 1, "1"},
+    {"params", GlArgKind::Unsupported, 1, "1"},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"params", GlArgKind::OutputPointer, 1, "1"},
+    {"params", GlArgKind::Unsupported, 1, "1"},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"params", GlArgKind::OutputPointer, 1, "1"},
+    {"params", GlArgKind::Unsupported, 1, "1"},
     {"mask", GlArgKind::OutputPointer, 1, "COMPSIZE()"},
     {"program", GlArgKind::Scalar, 1, ""},
     {"bufSize", GlArgKind::Scalar, 1, ""},
@@ -2605,7 +2606,7 @@ inline constexpr GlArg kGlArgs[] = {
     {"data", GlArgKind::OutputPointer, 1, "COMPSIZE(id)"},
     {"id", GlArgKind::Scalar, 1, ""},
     {"value", GlArgKind::Scalar, 1, ""},
-    {"data", GlArgKind::OutputPointer, 1, "COMPSIZE(id)"},
+    {"data", GlArgKind::Unsupported, 1, "COMPSIZE(id)"},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
@@ -2624,10 +2625,10 @@ inline constexpr GlArg kGlArgs[] = {
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"param", GlArgKind::OutputPointer, 1, "1"},
+    {"param", GlArgKind::Unsupported, 1, "1"},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"param", GlArgKind::OutputPointer, 1, "1"},
+    {"param", GlArgKind::Unsupported, 1, "1"},
     {"vaobj", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
     {"param", GlArgKind::OutputPointer, 1, ""},
@@ -2654,10 +2655,10 @@ inline constexpr GlArg kGlArgs[] = {
     {"params", GlArgKind::OutputPointer, 1, ""},
     {"index", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"pointer", GlArgKind::OutputPointer, 1, "1"},
+    {"pointer", GlArgKind::Unsupported, 1, "1"},
     {"index", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
-    {"pointer", GlArgKind::OutputPointer, 1, "1"},
+    {"pointer", GlArgKind::Unsupported, 1, "1"},
     {"index", GlArgKind::Scalar, 1, ""},
     {"pname", GlArgKind::Scalar, 1, ""},
     {"params", GlArgKind::OutputPointer, 1, "4"},
@@ -8671,23 +8672,23 @@ inline constexpr unsigned short kGlSignatureIds[] = {
     12, 8, 9, 9, 9, 9, 44, 44, 8, 9, 9, 9, 9, 2, 64, 48,
     48, 48, 48, 14, 48, 48, 48, 48, 48, 48, 48, 48, 48, 65, 48, 48,
     48, 48, 14, 2, 2, 3, 2, 3, 66, 67, 67, 68, 68, 69, 67, 67,
-    70, 66, 70, 71, 72, 72, 51, 51, 50, 50, 48, 50, 50, 50, 50, 50,
+    70, 66, 70, 71, 72, 72, 51, 51, 50, 50, 48, 50, 50, 50, 65535, 65535,
     66, 66, 48, 66, 66, 50, 50, 50, 50, 66, 50, 50, 66, 66, 73, 66,
     66, 50, 50, 50, 50, 74, 74, 50, 50, 50, 48, 49, 50, 50, 50, 48,
     51, 51, 51, 72, 66, 66, 50, 50, 49, 49, 14, 69, 69, 50, 50, 50,
     50, 75, 72, 50, 48, 50, 50, 48, 69, 69, 50, 50, 50, 50, 50, 50,
     50, 50, 50, 50, 50, 50, 50, 50, 69, 69, 50, 50, 50, 50, 66, 66,
-    66, 66, 66, 76, 69, 69, 66, 66, 66, 66, 50, 50, 50, 50, 50, 50,
+    66, 66, 66, 76, 69, 69, 66, 66, 66, 66, 50, 50, 50, 50, 65535, 65535,
     66, 66, 66, 66, 50, 50, 66, 66, 66, 66, 66, 66, 50, 50, 77, 78,
-    70, 70, 50, 50, 79, 48, 48, 48, 50, 50, 50, 50, 48, 48, 80, 81,
+    70, 70, 50, 50, 79, 48, 48, 48, 50, 50, 65535, 65535, 65535, 65535, 80, 81,
     50, 50, 72, 66, 50, 50, 72, 72, 50, 50, 52, 52, 52, 68, 82, 66,
     50, 50, 50, 8, 8, 8, 8, 66, 50, 50, 50, 50, 50, 50, 50, 50,
     50, 50, 50, 50, 50, 50, 50, 50, 50, 83, 83, 72, 72, 72, 72, 50,
     84, 63, 52, 52, 85, 50, 50, 50, 50, 50, 69, 66, 66, 50, 50, 50,
     50, 50, 50, 86, 76, 76, 66, 69, 66, 69, 50, 66, 50, 66, 50, 66,
     50, 66, 87, 88, 67, 67, 66, 66, 50, 51, 13, 89, 51, 51, 13, 50,
-    50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 48, 50, 50, 50, 50, 66,
-    66, 66, 50, 66, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50,
+    50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 48, 50, 50, 50, 65535, 66,
+    66, 66, 50, 65535, 65535, 50, 50, 50, 50, 50, 50, 50, 50, 65535, 65535, 50,
     50, 50, 50, 50, 50, 69, 69, 66, 66, 69, 69, 76, 76, 66, 66, 66,
     66, 66, 66, 76, 76, 50, 50, 50, 50, 50, 50, 48, 48, 90, 90, 76,
     76, 66, 66, 66, 66, 66, 66, 66, 66, 66, 66, 3, 8, 8, 91, 92,
@@ -8696,75 +8697,326 @@ inline constexpr unsigned short kGlSignatureIds[] = {
     14, 14, 14, 13, 13, 14, 14, 96, 14, 14, 51, 14, 14, 14, 14, 14,
     14, 14, 14, 14, 14, 14, 97, 14, 14, 96, 14, 13, 14, 10, 0, 35,
     3, 35, 43, 7, 5, 7, 3, 31, 2, 2, 2, 6, 17, 17, 2, 17,
-    17, 17, 17, 3, 2, 98, 99, 98, 98, 100, 101, 102, 103, 3, 3, 8,
-    57, 104, 105, 106, 3, 3, 8, 8, 43, 7, 5, 7, 107, 10, 35, 35,
-    35, 2, 35, 35, 35, 35, 2, 35, 35, 35, 35, 107, 2, 2, 108, 109,
-    110, 111, 110, 111, 2, 2, 2, 2, 7, 31, 31, 5, 5, 17, 17, 17,
-    17, 17, 17, 112, 112, 113, 114, 114, 115, 116, 115, 117, 118, 118, 8, 5,
-    8, 119, 119, 35, 35, 0, 0, 35, 35, 3, 3, 35, 35, 3, 3, 35,
-    35, 57, 57, 35, 35, 104, 104, 35, 35, 5, 5, 35, 35, 5, 5, 35,
-    35, 110, 110, 35, 35, 111, 111, 35, 35, 8, 8, 35, 35, 8, 8, 35,
-    35, 108, 108, 35, 35, 109, 109, 35, 35, 9, 9, 35, 35, 9, 9, 35,
-    35, 5, 7, 5, 7, 5, 7, 5, 7, 27, 120, 10, 8, 10, 121, 10,
-    120, 10, 8, 10, 40, 41, 33, 10, 10, 120, 10, 8, 10, 5, 39, 41,
+    17, 17, 17, 3, 2, 98, 99, 98, 98, 100, 101, 102, 103, 63, 63, 104,
+    57, 105, 106, 107, 63, 63, 104, 104, 43, 7, 5, 7, 108, 10, 35, 35,
+    35, 2, 35, 35, 35, 35, 2, 35, 35, 35, 35, 108, 2, 2, 109, 110,
+    111, 112, 111, 112, 2, 2, 2, 2, 7, 31, 31, 5, 5, 17, 17, 17,
+    17, 17, 17, 113, 113, 114, 115, 115, 116, 117, 116, 118, 119, 119, 8, 5,
+    8, 120, 120, 35, 35, 0, 0, 35, 35, 3, 3, 35, 35, 3, 3, 35,
+    35, 57, 57, 35, 35, 105, 105, 35, 35, 5, 5, 35, 35, 5, 5, 35,
+    35, 111, 111, 35, 35, 112, 112, 35, 35, 8, 8, 35, 35, 8, 8, 35,
+    35, 109, 109, 35, 35, 110, 110, 35, 35, 9, 9, 35, 35, 9, 9, 35,
+    35, 5, 7, 5, 7, 5, 7, 5, 7, 27, 121, 10, 8, 10, 122, 10,
+    121, 10, 8, 10, 40, 41, 33, 10, 10, 121, 10, 8, 10, 5, 39, 41,
     42, 24, 24, 8, 8, 24, 24, 25, 26, 10, 10, 9, 3, 7, 5, 5,
-    3, 8, 8, 10, 8, 9, 9, 44, 8, 9, 9, 9, 122, 10, 123, 10,
-    12, 10, 12, 10, 27, 27, 27, 27, 8, 8, 9, 44, 9, 124, 3, 5,
-    17, 18, 17, 19, 17, 5, 17, 5, 17, 3, 35, 7, 10, 10, 125, 64,
+    3, 8, 8, 10, 8, 9, 9, 44, 8, 9, 9, 9, 123, 10, 124, 10,
+    12, 10, 12, 10, 27, 27, 27, 27, 8, 8, 9, 44, 9, 125, 3, 5,
+    17, 18, 17, 19, 17, 5, 17, 5, 17, 3, 35, 7, 10, 10, 126, 64,
     31, 35, 3, 6, 7, 7, 7, 0, 3, 0, 3, 43, 7, 5, 7, 58,
     0, 0, 0, 35, 35, 35, 3, 35, 31, 3, 58, 19, 19, 58, 17, 6,
-    6, 6, 6, 6, 6, 126, 2, 62, 62, 24, 127, 7, 128, 7, 10, 127,
-    7, 128, 7, 10, 5, 5, 5, 10, 129, 129, 10, 10, 43, 43, 10, 10,
-    5, 130, 10, 5, 10, 10, 5, 130, 10, 5, 10, 10, 131, 131, 10, 10,
-    132, 132, 10, 10, 8, 133, 10, 8, 10, 10, 8, 133, 10, 8, 10, 10,
-    134, 134, 10, 10, 135, 135, 10, 10, 9, 136, 10, 9, 10, 10, 9, 136,
-    10, 9, 10, 10, 127, 127, 10, 10, 128, 128, 10, 10, 44, 137, 10, 44,
-    10, 10, 44, 137, 10, 44, 10, 10, 130, 10, 27, 27, 27, 27, 27, 27,
+    6, 6, 6, 6, 6, 127, 2, 62, 62, 24, 128, 7, 129, 7, 10, 128,
+    7, 129, 7, 10, 5, 5, 5, 10, 130, 130, 10, 10, 43, 43, 10, 10,
+    5, 131, 10, 5, 10, 10, 5, 131, 10, 5, 10, 10, 132, 132, 10, 10,
+    133, 133, 10, 10, 8, 134, 10, 8, 10, 10, 8, 134, 10, 8, 10, 10,
+    135, 135, 10, 10, 136, 136, 10, 10, 9, 137, 10, 9, 10, 10, 9, 137,
+    10, 9, 10, 10, 128, 128, 10, 10, 129, 129, 10, 10, 44, 138, 10, 44,
+    10, 10, 44, 138, 10, 44, 10, 10, 131, 10, 27, 27, 27, 27, 27, 27,
     27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
     27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 2, 2,
     2, 2, 2, 10, 35, 6, 2, 3, 56, 17, 58, 17, 3, 17, 3, 17,
     18, 17, 19, 17, 5, 17, 5, 17, 36, 17, 21, 17, 8, 17, 8, 17,
-    3, 2, 138, 139, 139, 36, 54, 21, 54, 8, 54, 8, 54, 140, 6, 14,
-    8, 8, 9, 9, 2, 2, 2, 2, 6, 36, 21, 141, 141, 141, 3, 2,
+    3, 2, 139, 140, 140, 36, 54, 21, 54, 8, 54, 8, 54, 141, 6, 14,
+    8, 8, 9, 9, 2, 2, 2, 2, 6, 36, 21, 142, 142, 142, 3, 2,
     7, 7, 43, 7, 5, 7, 18, 19, 8, 7, 9, 35, 5, 5, 17, 17,
     18, 18, 17, 17, 19, 19, 17, 17, 5, 5, 17, 17, 5, 5, 17, 17,
     5, 5, 17, 17, 5, 5, 17, 17, 5, 5, 17, 17, 3, 35, 10, 10,
-    48, 7, 142, 142, 7, 7, 2, 115, 5, 8, 9, 38, 38, 5, 3, 2,
-    143, 144, 144, 3, 5, 8, 2, 3, 5, 8, 44, 5, 17, 18, 17, 19,
+    48, 7, 143, 143, 7, 7, 2, 116, 5, 8, 9, 38, 38, 5, 3, 2,
+    144, 145, 145, 3, 5, 8, 2, 3, 5, 8, 44, 5, 17, 18, 17, 19,
     17, 5, 17, 5, 17, 7, 5, 5, 5, 9, 30, 17, 31, 17, 2, 17,
     2, 17, 56, 17, 58, 17, 3, 17, 3, 17, 18, 17, 19, 17, 5, 17,
     5, 17, 36, 17, 21, 17, 8, 17, 8, 17, 3, 35, 3, 35, 3, 35,
-    3, 35, 10, 27, 43, 7, 5, 7, 129, 7, 43, 7, 5, 7, 39, 40,
+    3, 35, 10, 27, 43, 7, 5, 7, 130, 7, 43, 7, 5, 7, 39, 40,
     44, 41, 41, 12, 47, 7, 7, 7, 7, 43, 7, 5, 7, 8, 8, 9,
-    9, 44, 44, 44, 12, 145, 146, 147, 147, 148, 28, 28, 40, 40, 33, 33,
+    9, 44, 44, 44, 12, 146, 147, 148, 148, 149, 28, 28, 40, 40, 33, 33,
     6, 5, 8, 9, 44, 40, 41, 33, 2, 3, 2, 47, 7, 10, 7, 10,
-    43, 120, 7, 10, 5, 8, 7, 10, 5, 8, 9, 9, 44, 44, 12, 44,
-    12, 12, 46, 145, 146, 147, 147, 148, 28, 39, 40, 41, 33, 42, 46, 5,
-    9, 24, 24, 18, 19, 119, 7, 0, 0, 7, 7, 3, 149, 7, 3, 7,
-    7, 3, 149, 7, 3, 7, 7, 57, 7, 104, 104, 7, 7, 5, 150, 7,
-    5, 7, 7, 5, 150, 7, 5, 7, 7, 110, 7, 111, 111, 7, 7, 8,
-    151, 7, 8, 7, 7, 8, 151, 7, 8, 7, 7, 108, 7, 109, 109, 7,
-    7, 9, 152, 7, 9, 7, 7, 9, 152, 7, 9, 7, 7, 5, 5, 149,
+    43, 121, 7, 10, 5, 8, 7, 10, 5, 8, 9, 9, 44, 44, 12, 44,
+    12, 12, 46, 146, 147, 148, 148, 149, 28, 39, 40, 41, 33, 42, 46, 5,
+    9, 24, 24, 18, 19, 120, 7, 0, 0, 7, 7, 3, 150, 7, 3, 7,
+    7, 3, 150, 7, 3, 7, 7, 57, 7, 105, 105, 7, 7, 5, 151, 7,
+    5, 7, 7, 5, 151, 7, 5, 7, 7, 111, 7, 112, 112, 7, 7, 8,
+    152, 7, 8, 7, 7, 8, 152, 7, 8, 7, 7, 109, 7, 110, 110, 7,
+    7, 9, 153, 7, 9, 7, 7, 9, 153, 7, 9, 7, 7, 5, 5, 150,
     7, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
     10, 10, 10, 10, 10, 10, 7, 6, 14, 14, 14, 14, 2, 2, 5, 5,
     3, 2, 2, 2, 2, 10, 35, 35, 35, 35, 35, 35, 35, 35, 56, 17,
     58, 17, 3, 17, 3, 17, 18, 17, 19, 17, 5, 17, 5, 17, 36, 17,
     21, 17, 8, 17, 8, 17, 5, 44, 9, 9, 9, 5, 44, 8, 3, 9,
     9, 12, 9, 44, 44, 5, 5, 44, 9, 12, 9, 12, 46, 5, 9, 11,
-    44, 119, 119, 35, 35, 0, 0, 35, 35, 3, 3, 35, 35, 57, 57, 35,
-    35, 104, 104, 35, 35, 5, 5, 35, 35, 110, 110, 35, 35, 111, 111, 35,
+    44, 120, 120, 35, 35, 0, 0, 35, 35, 3, 3, 35, 35, 57, 57, 35,
+    35, 105, 105, 35, 35, 5, 5, 35, 35, 111, 111, 35, 35, 112, 112, 35,
     35, 8, 8, 35, 35, 35, 35, 35, 35, 35, 35, 9, 9, 35, 35, 35,
-    35, 35, 35, 35, 35, 108, 108, 35, 35, 109, 109, 35, 35, 35, 35, 9,
+    35, 35, 35, 35, 35, 109, 109, 35, 35, 110, 110, 35, 35, 35, 35, 9,
     9, 35, 35, 35, 35, 35, 35, 35, 35, 3, 3, 3, 9, 3, 3, 35,
     35, 3, 3, 35, 35, 5, 5, 35, 35, 5, 5, 35, 35, 8, 8, 35,
     35, 8, 8, 35, 35, 35, 35, 9, 9, 35, 35, 35, 35, 35, 35, 9,
-    9, 35, 35, 35, 35, 8, 27, 27, 119, 119, 35, 35, 149, 35, 57, 57,
-    35, 35, 110, 110, 35, 35, 108, 108, 35, 35, 8, 27, 27, 8, 10, 8,
+    9, 35, 35, 35, 35, 8, 27, 27, 120, 120, 35, 35, 150, 35, 57, 57,
+    35, 35, 111, 111, 35, 35, 109, 109, 35, 35, 8, 27, 27, 8, 10, 8,
     10, 8, 10, 8, 10, 37, 37, 3, 2, 3, 35, 3, 35, 3, 35, 10,
-    27, 10, 31, 17, 8, 7, 109, 35, 143, 153, 10, 35, 35, 35, 35, 35,
+    27, 10, 31, 17, 8, 7, 110, 35, 144, 154, 10, 35, 35, 35, 35, 35,
     35, 35, 35, 56, 56, 17, 17, 58, 58, 17, 17, 3, 3, 17, 17, 3,
     3, 17, 17, 18, 18, 17, 17, 19, 19, 17, 17, 5, 5, 17, 17, 5,
     5, 17, 17, 7, 44
+};
+inline constexpr GlReturnKind kGlReturnKinds[] = {
+    GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar,
+    GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar,
+    GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Pointer, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Pointer, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Int64, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Pointer, GlReturnKind::Pointer, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Int64, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Int64, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Pointer, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar,
+    GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar,
+    GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar,
+    GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Pointer, GlReturnKind::Pointer, GlReturnKind::Pointer,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Pointer, GlReturnKind::Pointer, GlReturnKind::Pointer, GlReturnKind::Pointer,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Scalar,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Scalar, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void,
+    GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void, GlReturnKind::Void
 };
 inline constexpr unsigned char kGlArgSizes[] = {
     4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
@@ -9287,56 +9539,57 @@ inline uintptr_t gl_call_shape_100(uintptr_t p, const uintptr_t* a) { (void)a; u
 inline uintptr_t gl_call_shape_101(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), uint32_t(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
 inline uintptr_t gl_call_shape_102(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, uint32_t, uint32_t, double, double, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), uint32_t(a[5]), uint32_t(a[6]), gl_arg_double(a[7], a[8]), gl_arg_double(a[9], a[10]), uint32_t(a[11]), uint32_t(a[12]), reinterpret_cast<void*>(a[13])); return 0; }
 inline uintptr_t gl_call_shape_103(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, uint32_t, uint32_t, float, float, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), uint32_t(a[3]), uint32_t(a[4]), gl_arg_float(a[5]), gl_arg_float(a[6]), uint32_t(a[7]), uint32_t(a[8]), reinterpret_cast<void*>(a[9])); return 0; }
-inline uintptr_t gl_call_shape_104(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2])); return 0; }
-inline uintptr_t gl_call_shape_105(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, uint32_t, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), uint32_t(a[5]), gl_arg_double(a[6], a[7]), gl_arg_double(a[8], a[9])); return 0; }
-inline uintptr_t gl_call_shape_106(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), uint32_t(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5])); return 0; }
-inline uintptr_t gl_call_shape_107(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8]), gl_arg_double(a[9], a[10]), gl_arg_double(a[11], a[12])); return 0; }
-inline uintptr_t gl_call_shape_108(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8])); return 0; }
-inline uintptr_t gl_call_shape_109(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4])); return 0; }
-inline uintptr_t gl_call_shape_110(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6])); return 0; }
-inline uintptr_t gl_call_shape_111(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3])); return 0; }
-inline uintptr_t gl_call_shape_112(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3])); return 0; }
-inline uintptr_t gl_call_shape_113(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), uint32_t(a[3])); return 0; }
-inline uintptr_t gl_call_shape_114(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4])); return 0; }
-inline uintptr_t gl_call_shape_115(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4])); return 0; }
-inline uintptr_t gl_call_shape_116(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
-inline uintptr_t gl_call_shape_117(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), uint32_t(a[4])); return 0; }
-inline uintptr_t gl_call_shape_118(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5])); return 0; }
-inline uintptr_t gl_call_shape_119(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2])); return 0; }
-inline uintptr_t gl_call_shape_120(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_float(a[3])); return 0; }
-inline uintptr_t gl_call_shape_121(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_double(a[3], a[4])); return 0; }
-inline uintptr_t gl_call_shape_122(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8]), gl_arg_double(a[9], a[10])); return 0; }
-inline uintptr_t gl_call_shape_123(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5]), gl_arg_float(a[6])); return 0; }
-inline uintptr_t gl_call_shape_124(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_125(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2])); return 0; }
-inline uintptr_t gl_call_shape_126(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, float, float, float, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5]), gl_arg_float(a[6]), gl_arg_float(a[7])); return 0; }
-inline uintptr_t gl_call_shape_127(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7]), gl_arg_double(a[8], a[9])); return 0; }
-inline uintptr_t gl_call_shape_128(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5])); return 0; }
-inline uintptr_t gl_call_shape_129(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3])); return 0; }
-inline uintptr_t gl_call_shape_130(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3])); return 0; }
-inline uintptr_t gl_call_shape_131(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5])); return 0; }
-inline uintptr_t gl_call_shape_132(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3])); return 0; }
-inline uintptr_t gl_call_shape_133(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5])); return 0; }
-inline uintptr_t gl_call_shape_134(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7])); return 0; }
-inline uintptr_t gl_call_shape_135(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4])); return 0; }
-inline uintptr_t gl_call_shape_136(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5]), gl_arg_u64(a[6], a[7])); return 0; }
-inline uintptr_t gl_call_shape_137(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5]), gl_arg_u64(a[6], a[7]), gl_arg_u64(a[8], a[9])); return 0; }
-inline uintptr_t gl_call_shape_138(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6])); return 0; }
-inline uintptr_t gl_call_shape_139(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
-inline uintptr_t gl_call_shape_140(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]))); }
-inline uintptr_t gl_call_shape_141(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), uint32_t(a[1])); return 0; }
-inline uintptr_t gl_call_shape_142(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
-inline uintptr_t gl_call_shape_143(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
-inline uintptr_t gl_call_shape_144(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
-inline uintptr_t gl_call_shape_145(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), gl_arg_u64(a[5], a[6])); return 0; }
-inline uintptr_t gl_call_shape_146(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), gl_arg_u64(a[6], a[7])); return 0; }
-inline uintptr_t gl_call_shape_147(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), gl_arg_u64(a[7], a[8])); return 0; }
-inline uintptr_t gl_call_shape_148(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), gl_arg_u64(a[8], a[9])); return 0; }
-inline uintptr_t gl_call_shape_149(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2])); return 0; }
-inline uintptr_t gl_call_shape_150(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4])); return 0; }
-inline uintptr_t gl_call_shape_151(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4]), gl_arg_u64(a[5], a[6])); return 0; }
-inline uintptr_t gl_call_shape_152(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4]), gl_arg_u64(a[5], a[6]), gl_arg_u64(a[7], a[8])); return 0; }
-inline uintptr_t gl_call_shape_153(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3])); return 0; }
+inline uintptr_t gl_call_shape_104(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void*(*)(uint32_t, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]))); }
+inline uintptr_t gl_call_shape_105(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2])); return 0; }
+inline uintptr_t gl_call_shape_106(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, uint32_t, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), uint32_t(a[5]), gl_arg_double(a[6], a[7]), gl_arg_double(a[8], a[9])); return 0; }
+inline uintptr_t gl_call_shape_107(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), uint32_t(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5])); return 0; }
+inline uintptr_t gl_call_shape_108(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8]), gl_arg_double(a[9], a[10]), gl_arg_double(a[11], a[12])); return 0; }
+inline uintptr_t gl_call_shape_109(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8])); return 0; }
+inline uintptr_t gl_call_shape_110(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4])); return 0; }
+inline uintptr_t gl_call_shape_111(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6])); return 0; }
+inline uintptr_t gl_call_shape_112(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3])); return 0; }
+inline uintptr_t gl_call_shape_113(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3])); return 0; }
+inline uintptr_t gl_call_shape_114(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), uint32_t(a[3])); return 0; }
+inline uintptr_t gl_call_shape_115(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_116(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_117(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), uint32_t(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
+inline uintptr_t gl_call_shape_118(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), uint32_t(a[4])); return 0; }
+inline uintptr_t gl_call_shape_119(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, uint32_t, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5])); return 0; }
+inline uintptr_t gl_call_shape_120(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_double(a[1], a[2])); return 0; }
+inline uintptr_t gl_call_shape_121(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_float(a[3])); return 0; }
+inline uintptr_t gl_call_shape_122(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_double(a[3], a[4])); return 0; }
+inline uintptr_t gl_call_shape_123(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_double(a[3], a[4]), gl_arg_double(a[5], a[6]), gl_arg_double(a[7], a[8]), gl_arg_double(a[9], a[10])); return 0; }
+inline uintptr_t gl_call_shape_124(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5]), gl_arg_float(a[6])); return 0; }
+inline uintptr_t gl_call_shape_125(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_126(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2])); return 0; }
+inline uintptr_t gl_call_shape_127(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, float, float, float, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), gl_arg_float(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5]), gl_arg_float(a[6]), gl_arg_float(a[7])); return 0; }
+inline uintptr_t gl_call_shape_128(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7]), gl_arg_double(a[8], a[9])); return 0; }
+inline uintptr_t gl_call_shape_129(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4]), gl_arg_float(a[5])); return 0; }
+inline uintptr_t gl_call_shape_130(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3])); return 0; }
+inline uintptr_t gl_call_shape_131(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3])); return 0; }
+inline uintptr_t gl_call_shape_132(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5])); return 0; }
+inline uintptr_t gl_call_shape_133(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3])); return 0; }
+inline uintptr_t gl_call_shape_134(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5])); return 0; }
+inline uintptr_t gl_call_shape_135(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, double, double, double); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_double(a[2], a[3]), gl_arg_double(a[4], a[5]), gl_arg_double(a[6], a[7])); return 0; }
+inline uintptr_t gl_call_shape_136(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, float, float, float); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_float(a[2]), gl_arg_float(a[3]), gl_arg_float(a[4])); return 0; }
+inline uintptr_t gl_call_shape_137(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5]), gl_arg_u64(a[6], a[7])); return 0; }
+inline uintptr_t gl_call_shape_138(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3]), gl_arg_u64(a[4], a[5]), gl_arg_u64(a[6], a[7]), gl_arg_u64(a[8], a[9])); return 0; }
+inline uintptr_t gl_call_shape_139(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6])); return 0; }
+inline uintptr_t gl_call_shape_140(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
+inline uintptr_t gl_call_shape_141(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = uint32_t(*)(uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; return gl_return_value(fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]))); }
+inline uintptr_t gl_call_shape_142(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(float, uint32_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(gl_arg_float(a[0]), uint32_t(a[1])); return 0; }
+inline uintptr_t gl_call_shape_143(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), reinterpret_cast<void*>(a[6]), reinterpret_cast<void*>(a[7])); return 0; }
+inline uintptr_t gl_call_shape_144(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), reinterpret_cast<void*>(a[2]), uint32_t(a[3]), reinterpret_cast<void*>(a[4]), reinterpret_cast<void*>(a[5])); return 0; }
+inline uintptr_t gl_call_shape_145(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, void*, uint32_t, void*, void*); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), reinterpret_cast<void*>(a[1]), uint32_t(a[2]), reinterpret_cast<void*>(a[3]), reinterpret_cast<void*>(a[4])); return 0; }
+inline uintptr_t gl_call_shape_146(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), gl_arg_u64(a[5], a[6])); return 0; }
+inline uintptr_t gl_call_shape_147(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), gl_arg_u64(a[6], a[7])); return 0; }
+inline uintptr_t gl_call_shape_148(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), gl_arg_u64(a[7], a[8])); return 0; }
+inline uintptr_t gl_call_shape_149(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), uint32_t(a[1]), uint32_t(a[2]), uint32_t(a[3]), uint32_t(a[4]), uint32_t(a[5]), uint32_t(a[6]), uint32_t(a[7]), gl_arg_u64(a[8], a[9])); return 0; }
+inline uintptr_t gl_call_shape_150(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2])); return 0; }
+inline uintptr_t gl_call_shape_151(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4])); return 0; }
+inline uintptr_t gl_call_shape_152(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4]), gl_arg_u64(a[5], a[6])); return 0; }
+inline uintptr_t gl_call_shape_153(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(uint32_t(a[0]), gl_arg_u64(a[1], a[2]), gl_arg_u64(a[3], a[4]), gl_arg_u64(a[5], a[6]), gl_arg_u64(a[7], a[8])); return 0; }
+inline uintptr_t gl_call_shape_154(uintptr_t p, const uintptr_t* a) { (void)a; using Fn = void(*)(void*, uint32_t, uint64_t); auto fn = reinterpret_cast<Fn>(p); if (!fn) return 0; fn(reinterpret_cast<void*>(a[0]), uint32_t(a[1]), gl_arg_u64(a[2], a[3])); return 0; }
 inline uintptr_t gl_call_generated(unsigned short signature, uintptr_t p, const uintptr_t* a) { switch (signature) {
         case 0: return gl_call_shape_0(p, a);
         case 1: return gl_call_shape_1(p, a);
@@ -9492,5 +9745,6 @@ inline uintptr_t gl_call_generated(unsigned short signature, uintptr_t p, const 
         case 151: return gl_call_shape_151(p, a);
         case 152: return gl_call_shape_152(p, a);
         case 153: return gl_call_shape_153(p, a);
+        case 154: return gl_call_shape_154(p, a);
         default: return 0; } }
 }
