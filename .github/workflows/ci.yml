@@ -204,6 +204,8 @@ jobs:
           packages: gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 gcc-mingw-w64-i686 wine64 wine lld
       - name: Registry persistence and write-failure regression
         run: bash src/xbox-test/uwph/host/run-reg-selftest.sh
+      - name: Vulkan driver registry replaces stale entries on upgrade
+        run: bash src/xbox-test/app/tests/vulkan-registry-stale.sh
       - name: Owned x86 Steam provider gate and PE32 import resolution
         run: bash src/xbox-test/app/tests/x86-steam-provider.sh
       - name: "Audio ABI contract: XAudio2 and WASAPI SDK signatures"
