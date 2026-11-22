@@ -790,11 +790,6 @@ inline void register_win32(Registry& r, Host& h) {
         return 0; });
     unavailable_stdcall("gdi32.dll", "GetGlyphOutlineA", 7, uint32_t(-1));
     unavailable_stdcall("imm32.dll", "ImmAssociateContext", 2);
-    unavailable_stdcall("kernel32.dll", "GetDiskFreeSpaceA", 5);
-    unavailable_stdcall("kernel32.dll", "GetOverlappedResult", 4);
-    unavailable_stdcall("kernel32.dll", "OpenProcess", 3);
-    unavailable_stdcall("kernel32.dll", "ReadConsoleW", 5);
-    unavailable_stdcall("kernel32.dll", "UnmapViewOfFile", 1);
     unavailable_stdcall("sensapi.dll", "IsNetworkAlive", 1);
 }
 inline void register_xinput(Registry& r, Host& h) {
