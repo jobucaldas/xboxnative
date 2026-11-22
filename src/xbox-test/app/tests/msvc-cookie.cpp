@@ -198,8 +198,9 @@ int main(int argc,char** argv) {
     assert(argc==4);
     HMODULE nativeCarrier=LoadLibraryA(argv[3]); assert(nativeCarrier);
     nativeIndex=(DWORD(*)())GetProcAddress(nativeCarrier,"carrier_index");
-    carrier={counted_index,(BYTE*(*)())GetProcAddress(nativeCarrier,"carrier_block"),65536};
-    assert(nativeIndex && carrier.block);
+    carrier={counted_index,(BYTE*(*)())GetProcAddress(nativeCarrier,"carrier_block"),65536,
+             (void(*)(void(*)(DWORD)))GetProcAddress(nativeCarrier,"carrier_on_exit")};
+    assert(nativeIndex && carrier.block && carrier.onExit);
     Fixture original;
     std::ifstream input(argv[1],std::ios::binary);
     original.bytes.assign(std::istreambuf_iterator<char>(input),{}); assert(!original.bytes.empty());

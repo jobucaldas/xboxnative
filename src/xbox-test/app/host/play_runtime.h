@@ -1222,7 +1222,7 @@ static wxl::Carrier carrier() {
         } else {
             wchar_t name[64];swprintf(name,64,L"play-tls-%02u.dll",unsigned(slot));
             HMODULE h=LoadPackagedLibrary(name,0);
-            if(h){c.index=(DWORD(*)())GetProcAddress(h,"carrier_index");c.block=(BYTE*(*)())GetProcAddress(h,"carrier_block");}
+            if(h){c.index=(DWORD(*)())GetProcAddress(h,"carrier_index");c.block=(BYTE*(*)())GetProcAddress(h,"carrier_block");c.onExit=(void(*)(void(*)(DWORD)))GetProcAddress(h,"carrier_on_exit");}
             if(!c.index || !c.block)return {};
         }
         return c;

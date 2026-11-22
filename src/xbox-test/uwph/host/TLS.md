@@ -49,11 +49,16 @@ Compiler static TLS and TlsAlloc are different Windows storage mechanisms.
 thread. The native packaged carriers reserve 64 KiB per image/thread using the
 SDK CRT's standard TLS directory and startup lifecycle. Only its unused start
 sentinel may precede the reserved array; a changed CRT layout fails closed.
-`TlsAlloc` is used only for attachment bookkeeping. No TEB fields are modified.
+`TlsAlloc` is used only for bookkeeping. A template larger than the carrier's
+capacity swaps the thread's TEB static-TLS slot for a heap block, and only
+when `Carrier::onExit` (the carrier's `carrier_on_exit` export) is set. The
+carrier's first TLS callback calls that hook on thread or process detach. That
+callback runs after every FLS callback, so guest FLS callbacks still see the
+guest block, and before the carrier's CRT TLS callbacks and `DllMain`, which get
+their own block back. `src/xbox-test/app/tests/tls-thread-exit.sh` checks this order under Wine.
 
 The caller must retain each carrier while its guest is loaded. Only one guest
-may own a carrier at once. Templates larger than 64 KiB or requiring alignment
-above 16 fail. Explicit `attachThread(DLL_THREAD_ATTACH)` and
+may own a carrier at once. Templates requiring alignment above 16 fail. Explicit `attachThread(DLL_THREAD_ATTACH)` and
 `detachThread(DLL_THREAD_DETACH)` surround every managed worker entry. Join all
 workers before image/carrier destruction. Raw guest-created threads require a
 future thread-creation adapter; this loader does not intercept arbitrary threads.
