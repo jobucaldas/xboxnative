@@ -87,7 +87,7 @@ struct Cm {
     uint32_t join_response = EnterSuccess;
     int32_t list_eresult = steam_lobbies::ResultOK;
     std::vector<uint64_t> listed;
-    std::vector<std::string> set_data, list_body, data_body, chat_body, server_body, owner_body;   // each request seen
+    std::vector<std::string> set_data, list_body, data_body, chat_body, server_body, owner_body, invite_body;   // each request seen
     uint64_t next_id = 0x1100001000000ull;
     std::function<void()> on_call;          // runs inside the request, for the in-flight test
 
@@ -126,6 +126,7 @@ struct Cm {
             return true;
         case steam_lobbies::SendLobbyChatMsg: chat_body.push_back(body); return true;      // no response of its own
         case steam_lobbies::SetLobbyGameServer: server_body.push_back(body); return true;
+        case steam_lobbies::InviteToLobby: invite_body.push_back(body); return true;      // no response of its own
         case steam_lobbies::JoinLobby: {
             uint64_t id = 0;
             for (auto& f : fields) if (f.f == 2) id = f.u;
@@ -739,6 +740,49 @@ void lobby_data_members_chat() {
     for (int i = 0; i < 16; ++i) CHECK(!strcmp(kept[i], i % 2 ? "pvp" : ""));
 }
 
+// ---- InviteUserToLobby: one CMsgClientMMSInviteToLobby, only for the lobby the account is in
+void invite_user() {
+    reset_provider();
+    Lobbied g(true);                                // manual executor: the CM sees nothing until drain()
+    Hub& hub = g.hub(); Cm& cm = g.rig.cm; const uint64_t lobby = g.lobby;
+    cm.invite_body.clear();
+    CHECK(hub.invite_user(nullptr, nullptr, lobby, kPeerId));
+    CHECK(cm.count(steam_lobbies::InviteToLobby) == 0);   // posted, not yet run
+    g.rig.drain();
+    CHECK(cm.count(steam_lobbies::InviteToLobby) == 1 && cm.invite_body.size() == 1);
+    {
+        auto fields = pb_parse(cm.invite_body[0]);
+        CHECK(pb_get(fields, 1) && pb_get(fields, 1)->u == kAppId);
+        CHECK(pb_get(fields, 2) && pb_get(fields, 2)->u == lobby);
+        CHECK(pb_get(fields, 3) && pb_get(fields, 3)->u == kPeerId);
+    }
+    CHECK(cm.routed.back() == kAppId);
+    // Refused without a CM round trip: no invitee, no lobby, another lobby.
+    CHECK(!hub.invite_user(nullptr, nullptr, lobby, 0) && !hub.invite_user(nullptr, nullptr, 0, kPeerId));
+    CHECK(!hub.invite_user(nullptr, nullptr, lobby + 1, kPeerId));
+    g.rig.drain();
+    CHECK(cm.count(steam_lobbies::InviteToLobby) == 1);
+    // After leaving, the account is in no lobby, so the same invite is refused.
+    hub.leave_lobby(p_leave, nullptr, lobby);
+    g.rig.drain();
+    CHECK(!hub.invite_user(nullptr, nullptr, lobby, kPeerId));
+    g.rig.drain();
+    CHECK(cm.count(steam_lobbies::InviteToLobby) == 1 && P.leave == 0);
+    // A transport failure is not the game's to see: the request was made.
+    Lobbied down(true);
+    down.rig.cm.down = true;
+    CHECK(down.hub().invite_user(nullptr, nullptr, down.lobby, kPeerId));
+    down.rig.drain();
+    // Never in a lobby (no tap installed, or no ManualDispatch) -> the provider's own export answers.
+    Hub plain;
+    P.lobby = 0;
+    CHECK(plain.invite_user([](void*, uint64_t l, uint64_t i) { P.lobby = l; return i == 7; }, nullptr, 0x55, 7) && P.lobby == 0x55);
+    Rig early;
+    CHECK(early.hub.pipe(p_pipe) == kPipe);        // Init not seen: inactive
+    CHECK(!early.hub.invite_user([](void*, uint64_t, uint64_t) { return false; }, nullptr, 1, 2));
+    CHECK(early.tasks.empty() && early.cm.emsgs.empty());
+}
+
 // ---- 12: list filters, and lobbies from the last list
 void filters_and_listed_lobbies() {
     reset_provider();
@@ -1078,6 +1122,7 @@ void passthrough_phase2(Hub& hub, int expected_calls) {
     hub.compatible_members_filter([](void*, uint64_t) { ++Q.calls; }, self, 1);
     CHECK(hub.send_lobby_chat([](void*, uint64_t, const void*, int n) { ++Q.calls; return n == 2; }, self, 1, "ab", 2));
     CHECK(hub.lobby_chat_entry([](void*, uint64_t, int, uint64_t*, void*, int, int32_t*) { ++Q.calls; return 5; }, self, 1, 0, nullptr, nullptr, 0, nullptr) == 5);
+    CHECK(hub.invite_user([](void*, uint64_t l, uint64_t i) { ++Q.calls; return l == 1 && i == 2; }, self, 1, 2));
     CHECK(Q.calls == expected_calls);
     // A null provider export never crashes either.
     CHECK(!strcmp(hub.lobby_data(nullptr, self, 1, "k"), "") && !hub.set_lobby_data(nullptr, self, 1, "k", "v") &&
@@ -1086,7 +1131,7 @@ void passthrough_phase2(Hub& hub, int expected_calls) {
 }
 void passthrough_phase2_exports() {
     reset_provider();
-    constexpr int kExports = 27;
+    constexpr int kExports = 28;
     {   Hub hub; passthrough_phase2(hub, kExports); }                       // no tap
     {   // a tap, but the game never called ManualDispatch_Init
         Rig rig;
@@ -1122,6 +1167,7 @@ int main() {
     list_join_leave();
     teardown_in_flight();
     lobby_data_members_chat();
+    invite_user();
     filters_and_listed_lobbies();
     cm_pushes();
     serial_executor();

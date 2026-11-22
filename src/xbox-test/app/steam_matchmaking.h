@@ -334,6 +334,7 @@ using IntArgFn = void (*)(void* self, int value);              // slots availabl
 using U64ArgFn = void (*)(void* self, uint64_t value);         // compatible members
 using SendChatFn = bool (*)(void* self, uint64_t lobby, const void* body, int size);
 using ChatEntryFn = int (*)(void* self, uint64_t lobby, int chat_id, uint64_t* user, void* data, int size, int32_t* type);
+using InviteFn = bool (*)(void* self, uint64_t lobby, uint64_t invitee);                  // InviteUserToLobby
 
 // A serial worker for the CM round trips: tasks run one at a time in the order
 // they were posted, off the game's thread. stop() drops what has not started.
@@ -801,6 +802,23 @@ public:
         });
         return true;
     }
+    // Invites a user to the lobby the game is in; the CM delivers it, and the
+    // invitee's own client raises the callback. Like Steam's, true means the
+    // request was made, not that it was accepted.
+    bool invite_user(uint64_t lobby, uint64_t invitee) {
+        if (!lobby || !invitee) return false;
+        {
+            auto& b = *s_->cfg.bridge;
+            std::lock_guard<std::mutex> lock(b.m);
+            if (!b.lobby || b.lobby != lobby) return false;
+        }
+        auto s = s_;
+        run(s, [s, lobby, invitee] {
+            Op op(*s);
+            steam_lobbies::invite(op.io, s->cfg.appid, lobby, invitee);
+        });
+        return true;
+    }
     // Copies what fits; returns the bytes copied, 0 for an unknown entry.
     int chat_entry(uint64_t lobby, int chat_id, uint64_t* user, void* data, int size, int32_t* type) const {
         std::lock_guard<std::mutex> lock(s_->m);
@@ -1184,6 +1202,9 @@ public:
                          int32_t* type) {
         return route(real, 0, [&](Matchmaking& m) { return m.chat_entry(lobby, chat_id, user, data, size, type); },
                      self, lobby, chat_id, user, data, size, type);
+    }
+    bool invite_user(InviteFn real, void* self, uint64_t lobby, uint64_t invitee) {
+        return route(real, false, [&](Matchmaking& m) { return m.invite_user(lobby, invitee); }, self, lobby, invitee);
     }
 
     // A CM push (on the CM reader thread). Only an active tap takes it: a game
