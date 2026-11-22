@@ -926,7 +926,7 @@ static std::atomic<uintptr_t> matchmakingRealInit{0}, matchmakingRealPipe{0}, ma
 // filters and chat. Each export keeps its own slot for the provider's function;
 // with no tap installed, or before the game called ManualDispatch_Init, the hub
 // calls that function with the same arguments.
-enum MmId { MmLobbyData, MmSetData, MmDeleteData, MmDataCount, MmDataByIndex, MmRequestData, MmMemberData, MmSetMemberData, MmNumMembers, MmMemberByIndex, MmOwner, MmSetOwner, MmMemberLimit, MmSetMemberLimit, MmSetType, MmSetJoinable, MmGetServer, MmSetServer, MmStringFilter, MmNumericalFilter, MmNearFilter, MmSlotsFilter, MmDistanceFilter, MmCountFilter, MmCompatibleFilter, MmSendChat, MmChatEntry };
+enum MmId { MmLobbyData, MmSetData, MmDeleteData, MmDataCount, MmDataByIndex, MmRequestData, MmMemberData, MmSetMemberData, MmNumMembers, MmMemberByIndex, MmOwner, MmSetOwner, MmMemberLimit, MmSetMemberLimit, MmSetType, MmSetJoinable, MmGetServer, MmSetServer, MmStringFilter, MmNumericalFilter, MmNearFilter, MmSlotsFilter, MmDistanceFilter, MmCountFilter, MmCompatibleFilter, MmSendChat, MmChatEntry, MmInviteUser };
 template<int Id> struct MmSlot { static inline std::atomic<uintptr_t> real{0}; };
 template<int Id,class Fn> static Fn mmReal() { return (Fn)MmSlot<Id>::real.load(std::memory_order_acquire); }
 static uintptr_t matchmakingLobbyHook(const char* name,uintptr_t real) {
@@ -1146,6 +1146,14 @@ static uintptr_t matchmakingLobbyHook(const char* name,uintptr_t real) {
         MmSlot<MmChatEntry>::real.store(real,std::memory_order_release);
         static Fn hook=[](void* self,uint64_t lobby,int chatId,uint64_t* user,void* data,int size,int32_t* type)->int{
             return matchmakingHub.lobby_chat_entry(mmReal<MmChatEntry,Fn>(),self,lobby,chatId,user,data,size,type);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"InviteUserToLobby")) {
+        using Fn=steam_matchmaking::InviteFn;
+        MmSlot<MmInviteUser>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,uint64_t invitee)->bool{
+            return matchmakingHub.invite_user(mmReal<MmInviteUser,Fn>(),self,lobby,invitee);
         };
         return (uintptr_t)hook;
     }

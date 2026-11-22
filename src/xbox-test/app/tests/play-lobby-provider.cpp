@@ -56,13 +56,26 @@ static Done done[MAX_DONE];
 static int doneCount;
 static uint64_t nextCall = 0x9f12345678900001ull;   // top bit set, like half of gbe_fork's
 // 0 create, 1 list, 2 by-index, 3 join, 4 leave, 5 init, 6 pipe, 7 free with nothing
-// outstanding, 8 result asked for a handle the provider never gave
-static int counters[9];
+// outstanding, 8 result asked for a handle the provider never gave. Phase 2: 9 GetLobbyData,
+// 10 SetLobbyData, 11 DeleteLobbyData, 12 GetLobbyDataCount, 13 GetLobbyDataByIndex,
+// 14 GetNumLobbyMembers, 15 GetLobbyMemberByIndex, 16 GetLobbyOwner, 17 GetLobbyMemberLimit,
+// 18 SetLobbyMemberLimit, 19 SetLobbyType, 20 AddRequestLobbyListStringFilter,
+// 21 SendLobbyChatMsg, 22 GetLobbyChatEntry, 23 GetLobbyGameServer, 24 SetLobbyGameServer,
+// 25 InviteUserToLobby
+static int counters[26];
 
 static const uint64_t ProviderLobby = 0x1100001000099ull;   // fixture ids, never a real account
 static const uint64_t ProviderByIndex = 0x1100001000A00ull;
+static const uint64_t ProviderMember = 0x1100001000B00ull;
+static const uint64_t ProviderOwner = 0x1100001000C00ull;
 
 static void copyIn(uint8_t* to, const void* from, uint32_t n) { for (uint32_t i = 0; i < n; ++i) to[i] = ((const uint8_t*)from)[i]; }
+static void putText(char* to, int size, const char* text) {
+    if (!to || size <= 0) return;
+    int i = 0;
+    for (; text[i] && i < size - 1; ++i) to[i] = text[i];
+    to[i] = 0;
+}
 
 static uint64_t complete(int callback, const void* data, uint32_t size) {
     uint64_t call = nextCall++;
@@ -143,8 +156,98 @@ __declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamMatchmaking_JoinLobby(void
 }
 __declspec(dllexport) void __cdecl SteamAPI_ISteamMatchmaking_LeaveLobby(void* self, uint64_t lobby) { (void)self; (void)lobby; ++counters[4]; }
 
+// Phase 2: stand-ins with answers no launcher state could produce (a data count of 77, a
+// member limit of 11, the provider's own ids), so the guest can tell who answered.
+__declspec(dllexport) const char* __cdecl SteamAPI_ISteamMatchmaking_GetLobbyData(void* self, uint64_t lobby, const char* key) {
+    (void)self; (void)lobby; (void)key;
+    ++counters[9];
+    return "provider-data";
+}
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamMatchmaking_SetLobbyData(void* self, uint64_t lobby, const char* key, const char* value) {
+    (void)self; (void)lobby; (void)key; (void)value;
+    ++counters[10];
+    return true;
+}
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamMatchmaking_DeleteLobbyData(void* self, uint64_t lobby, const char* key) {
+    (void)self; (void)lobby; (void)key;
+    ++counters[11];
+    return true;
+}
+__declspec(dllexport) int __cdecl SteamAPI_ISteamMatchmaking_GetLobbyDataCount(void* self, uint64_t lobby) {
+    (void)self; (void)lobby;
+    ++counters[12];
+    return 77;
+}
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex(void* self, uint64_t lobby, int index, char* key, int keySize, char* value, int valueSize) {
+    (void)self; (void)lobby; (void)index;
+    ++counters[13];
+    putText(key, keySize, "pk"); putText(value, valueSize, "pv");
+    return true;
+}
+__declspec(dllexport) int __cdecl SteamAPI_ISteamMatchmaking_GetNumLobbyMembers(void* self, uint64_t lobby) {
+    (void)self; (void)lobby;
+    ++counters[14];
+    return 9;
+}
+__declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex(void* self, uint64_t lobby, int index) {
+    (void)self; (void)lobby;
+    ++counters[15];
+    return ProviderMember + (uint64_t)index;
+}
+__declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamMatchmaking_GetLobbyOwner(void* self, uint64_t lobby) {
+    (void)self; (void)lobby;
+    ++counters[16];
+    return ProviderOwner;
+}
+__declspec(dllexport) int __cdecl SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit(void* self, uint64_t lobby) {
+    (void)self; (void)lobby;
+    ++counters[17];
+    return 11;
+}
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit(void* self, uint64_t lobby, int limit) {
+    (void)self; (void)lobby; (void)limit;
+    ++counters[18];
+    return true;
+}
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamMatchmaking_SetLobbyType(void* self, uint64_t lobby, int type) {
+    (void)self; (void)lobby; (void)type;
+    ++counters[19];
+    return true;
+}
+__declspec(dllexport) void __cdecl SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter(void* self, const char* key, const char* value, int comparison) {
+    (void)self; (void)key; (void)value; (void)comparison;
+    ++counters[20];
+}
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamMatchmaking_SendLobbyChatMsg(void* self, uint64_t lobby, const void* body, int size) {
+    (void)self; (void)lobby; (void)body; (void)size;
+    ++counters[21];
+    return true;
+}
+__declspec(dllexport) int __cdecl SteamAPI_ISteamMatchmaking_GetLobbyChatEntry(void* self, uint64_t lobby, int chatId, uint64_t* user, void* data, int size, int32_t* type) {
+    (void)self; (void)lobby; (void)chatId; (void)user; (void)data; (void)size; (void)type;
+    ++counters[22];
+    return 5;
+}
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamMatchmaking_GetLobbyGameServer(void* self, uint64_t lobby, uint32_t* ip, uint16_t* port, uint64_t* server) {
+    (void)self; (void)lobby;
+    ++counters[23];
+    if (ip) *ip = 1;
+    if (port) *port = 2;
+    if (server) *server = 3;
+    return true;
+}
+__declspec(dllexport) void __cdecl SteamAPI_ISteamMatchmaking_SetLobbyGameServer(void* self, uint64_t lobby, uint32_t ip, uint16_t port, uint64_t server) {
+    (void)self; (void)lobby; (void)ip; (void)port; (void)server;
+    ++counters[24];
+}
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamMatchmaking_InviteUserToLobby(void* self, uint64_t lobby, uint64_t invitee) {
+    (void)self; (void)lobby; (void)invitee;
+    ++counters[25];
+    return true;
+}
+
 // Test-only: how often the provider was asked, by counter index (see above).
-__declspec(dllexport) int __cdecl PlayLobbyCalls(int which) { return which >= 0 && which < 9 ? counters[which] : -1; }
+__declspec(dllexport) int __cdecl PlayLobbyCalls(int which) { return which >= 0 && which < 26 ? counters[which] : -1; }
 // Test-only: the lobby the provider answers CreateLobby and GetLobbyByIndex(0) with.
 __declspec(dllexport) uint64_t __cdecl PlayLobbyProviderLobby(int byIndex) { return byIndex ? ProviderByIndex : ProviderLobby; }
 }

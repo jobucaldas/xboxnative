@@ -210,6 +210,23 @@ EXPORTS
  SteamAPI_ISteamMatchmaking_GetLobbyByIndex
  SteamAPI_ISteamMatchmaking_JoinLobby
  SteamAPI_ISteamMatchmaking_LeaveLobby
+ SteamAPI_ISteamMatchmaking_GetLobbyData
+ SteamAPI_ISteamMatchmaking_SetLobbyData
+ SteamAPI_ISteamMatchmaking_DeleteLobbyData
+ SteamAPI_ISteamMatchmaking_GetLobbyDataCount
+ SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex
+ SteamAPI_ISteamMatchmaking_GetNumLobbyMembers
+ SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex
+ SteamAPI_ISteamMatchmaking_GetLobbyOwner
+ SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit
+ SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit
+ SteamAPI_ISteamMatchmaking_SetLobbyType
+ SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter
+ SteamAPI_ISteamMatchmaking_SendLobbyChatMsg
+ SteamAPI_ISteamMatchmaking_GetLobbyChatEntry
+ SteamAPI_ISteamMatchmaking_GetLobbyGameServer
+ SteamAPI_ISteamMatchmaking_SetLobbyGameServer
+ SteamAPI_ISteamMatchmaking_InviteUserToLobby
  PlayLobbyCalls
  PlayLobbyProviderLobby
 DEF
@@ -458,10 +475,15 @@ if grep -qE "Player (Two|Three|Four)|Fixture Owner|1100001000" "$out/leaderboard
 # once; the control run proves the provider stand-in alone passes everything through.
 [[ $lobby_control_code == 42 ]]
 grep -q "PRUN matchmaking tap staged" "$out/lobbies.log"
-for hooked in SteamAPI_ManualDispatch_Init SteamAPI_GetHSteamPipe SteamAPI_ManualDispatch_GetNextCallback SteamAPI_ManualDispatch_FreeLastCallback SteamAPI_ManualDispatch_GetAPICallResult SteamAPI_ISteamMatchmaking_CreateLobby SteamAPI_ISteamMatchmaking_RequestLobbyList SteamAPI_ISteamMatchmaking_GetLobbyByIndex SteamAPI_ISteamMatchmaking_JoinLobby SteamAPI_ISteamMatchmaking_LeaveLobby;do
+for hooked in SteamAPI_ManualDispatch_Init SteamAPI_GetHSteamPipe SteamAPI_ManualDispatch_GetNextCallback SteamAPI_ManualDispatch_FreeLastCallback SteamAPI_ManualDispatch_GetAPICallResult SteamAPI_ISteamMatchmaking_CreateLobby SteamAPI_ISteamMatchmaking_RequestLobbyList SteamAPI_ISteamMatchmaking_GetLobbyByIndex SteamAPI_ISteamMatchmaking_JoinLobby SteamAPI_ISteamMatchmaking_LeaveLobby \
+  SteamAPI_ISteamMatchmaking_GetLobbyData SteamAPI_ISteamMatchmaking_SetLobbyData SteamAPI_ISteamMatchmaking_DeleteLobbyData SteamAPI_ISteamMatchmaking_GetLobbyDataCount SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex \
+  SteamAPI_ISteamMatchmaking_GetNumLobbyMembers SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex SteamAPI_ISteamMatchmaking_GetLobbyOwner SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit \
+  SteamAPI_ISteamMatchmaking_SetLobbyType SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter SteamAPI_ISteamMatchmaking_SendLobbyChatMsg SteamAPI_ISteamMatchmaking_GetLobbyChatEntry \
+  SteamAPI_ISteamMatchmaking_GetLobbyGameServer SteamAPI_ISteamMatchmaking_SetLobbyGameServer SteamAPI_ISteamMatchmaking_InviteUserToLobby;do
   grep -q "STEAM matchmaking: $hooked observed; the provider answers unless the launcher installed a lobby tap" "$out/lobbies.log"
 done
-grep -q "PLAY-LOBBIES creates=1 lists=1 joins=1 leaves=1" "$out/lobbies.log"
+# Phase 2 (#179): the fake CM served each write once (data, chat, game server, invite) and the one list filter.
+grep -q "PLAY-LOBBIES creates=1 lists=1 joins=1 leaves=1 setdata=4 chats=1 servers=1 invites=1 filters=1" "$out/lobbies.log"
 grep -q "STEAM lobbies: created lobby#" "$out/lobbies.log"
 grep -q "STEAM lobbies: joined lobby#" "$out/lobbies.log"
 # Counts only: no persona name and no full lobby or SteamID may reach the log.
