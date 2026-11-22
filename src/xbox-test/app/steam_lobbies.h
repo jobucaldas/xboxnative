@@ -23,6 +23,7 @@
 #include "steam_wire.h"
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -354,6 +355,68 @@ inline int32_t parse_status(const std::string& body, int32_t headerEresult) {
     return status;
 }
 
+// ---- lobby / member metadata
+// The CM carries lobby and member data as a binary KeyValues blob (Valve's
+// KeyValues::WriteAsBinary shape): a root sub-key header (`00 \0`), then
+// `01 key\0 value\0` per string pair, closed by `08 08`. Decoding also accepts
+// unwrapped pairs, int32 / int64 / uint64 / float values (read as their decimal
+// text), wide strings (skipped without losing place), nested sub-keys
+// (flattened away) and a missing terminator. Keys are kept sorted, so
+// GetLobbyDataByIndex is stable.
+inline std::map<std::string, std::string> kv_decode(const std::string& blob) {
+    std::map<std::string, std::string> out;
+    size_t i = 0; const size_t n = blob.size();
+    auto cstr = [&](std::string& s) {
+        size_t e = blob.find('\0', i);
+        if (e == std::string::npos) return false;
+        s.assign(blob, i, e - i); i = e + 1; return true;
+    };
+    auto skip = [&](size_t bytes) { if (n - i < bytes) return false; i += bytes; return true; };
+    while (i < n) {
+        const unsigned char type = static_cast<unsigned char>(blob[i++]);
+        if (type == 8) continue;                           // end of a (sub)key: more peers may follow
+        std::string key;
+        if (!cstr(key)) break;
+        if (type == 0) continue;                           // a sub-key header: its children follow flat
+        std::string value;
+        if (type == 1) { if (!cstr(value)) break; }
+        else if (type == 2) {
+            if (n - i < 4) break;
+            int32_t v; memcpy(&v, blob.data() + i, 4); i += 4; value = std::to_string(v);
+        } else if (type == 7) {
+            if (n - i < 8) break;
+            uint64_t v; memcpy(&v, blob.data() + i, 8); i += 8; value = std::to_string(v);
+        } else if (type == 10) {
+            if (n - i < 8) break;
+            int64_t v; memcpy(&v, blob.data() + i, 8); i += 8; value = std::to_string(v);
+        } else if (type == 3) {
+            if (n - i < 4) break;
+            float v; memcpy(&v, blob.data() + i, 4); i += 4; value = std::to_string(v);
+        } else if (type == 5) {
+            // Wide string (UTF-16LE, NUL-terminated): advance past it cleanly.
+            bool closed = false;
+            while (n - i >= 2) {
+                uint16_t ch; memcpy(&ch, blob.data() + i, 2); i += 2;
+                if (ch == 0) { closed = true; break; }
+            }
+            if (!closed) break;
+            continue;
+        } else if (!skip(4)) break;                        // pointer / colour: nothing a game reads as text
+        else continue;
+        out[key] = value;
+    }
+    return out;
+}
+inline std::string kv_encode(const std::map<std::string, std::string>& kv) {
+    std::string out;
+    out += char(0); out += char(0);                        // unnamed root sub-key header
+    for (auto& [key, value] : kv) {
+        out += char(1); out += key; out += char(0); out += value; out += char(0);
+    }
+    out += char(8); out += char(8);                        // end root sub-key, end stream
+    return out;
+}
+
 // ---- the calls
 inline Lobby create(Io& io, uint32_t appid, int max_members, int lobby_type, int lobby_flags,
                     const std::string& metadata, const std::string& persona) {
@@ -490,6 +553,8 @@ struct Bridge {
     int32_t max_members = 0, lobby_type = 0, lobby_flags = 0;
     std::string metadata;
     std::map<uint64_t, std::string> members;   // steamid -> persona
+    std::map<uint64_t, std::string> member_metadata;   // steamid -> that member's KeyValues blob
+    GameServer server;                          // the lobby's advertised game server, if any
     bool owner_self = false;
 
     // Creates a lobby and remembers it. A create that Steam refuses leaves the
@@ -502,7 +567,7 @@ struct Bridge {
         if (!made.found) { clear(); return false; }
         lobby = made.steamid; owner = 0; owner_self = true;
         max_members = max; lobby_type = type; lobby_flags = flags; metadata = meta;
-        members.clear();
+        members.clear(); member_metadata.clear(); server = GameServer();
         auto settled = steam_lobbies::data(io, appid, lobby);
         if (settled.found) {
             owner = settled.owner;
@@ -510,7 +575,7 @@ struct Bridge {
             if (settled.lobby_type) lobby_type = settled.lobby_type;
             lobby_flags = settled.lobby_flags;
             if (!settled.metadata.empty()) metadata = settled.metadata;
-            for (auto& mem : settled.members) members[mem.steamid] = mem.persona;
+            for (auto& mem : settled.members) adopt_member(mem);
         }
         char line[200];
         snprintf(line, sizeof line, "lobbies: created %s (%zu/%d, type %d)", lobby_name().c_str(), members.size(), max, type);
@@ -525,8 +590,8 @@ struct Bridge {
         lobby = joined.steamid; owner = joined.owner;
         max_members = joined.max_members; lobby_type = joined.lobby_type; lobby_flags = joined.lobby_flags;
         metadata = joined.metadata;
-        members.clear();
-        for (auto& mem : joined.members) members[mem.steamid] = mem.persona;
+        members.clear(); member_metadata.clear(); server = GameServer();
+        for (auto& mem : joined.members) adopt_member(mem);
         owner_self = false;
         char line[200];
         snprintf(line, sizeof line, "lobbies: joined %s (%zu members)", lobby_name().c_str(), members.size());
@@ -550,8 +615,8 @@ struct Bridge {
         owner = data.owner;
         max_members = data.max_members; lobby_type = data.lobby_type; lobby_flags = data.lobby_flags;
         metadata = data.metadata;
-        members.clear();
-        for (auto& mem : data.members) members[mem.steamid] = mem.persona;
+        members.clear(); member_metadata.clear();
+        for (auto& mem : data.members) adopt_member(mem);
         return true;
     }
     // A pushed UserJoinedLobby (6619) / UserLeftLobby (6620).
@@ -560,7 +625,7 @@ struct Bridge {
         if (!lobby || change.lobby != lobby) return false;
         if (change.joined) members[change.user] = change.persona;
         else {
-            members.erase(change.user);
+            members.erase(change.user); member_metadata.erase(change.user);
             // The owner left: Steam hands ownership to someone still in the
             // lobby, and the pushed LobbyData that follows is authoritative.
             if (change.user == owner) owner = 0;
@@ -570,7 +635,14 @@ struct Bridge {
     // A pushed LobbyChatMsg (6614) for the lobby the bridge is in.
     bool accepts_chat(const ChatMsg& msg) const { return lobby != 0 && msg.lobby == lobby; }
     // A pushed LobbyGameServerSet (6618) for the lobby the bridge is in.
-    bool accepts_server(const GameServer& server) const { return lobby != 0 && server.lobby == lobby; }
+    bool accepts_server(const GameServer& pushed) const { return lobby != 0 && pushed.lobby == lobby; }
+    // Adopts a pushed LobbyGameServerSet (6618) for the lobby the bridge is in.
+    bool apply_server(const GameServer& pushed) {
+        std::lock_guard<std::mutex> lock(m);
+        if (!accepts_server(pushed)) return false;
+        server = pushed;
+        return true;
+    }
     bool in_lobby() const { return lobby != 0; }
     // The id as the log should show it: the low 32 bits, never the whole
     // account-adjacent value in a file that may be shared.
@@ -581,7 +653,11 @@ struct Bridge {
     }
     void clear() {
         lobby = 0; owner = 0; max_members = 0; lobby_type = 0; lobby_flags = 0;
-        metadata.clear(); members.clear(); owner_self = false;
+        metadata.clear(); members.clear(); member_metadata.clear(); server = GameServer(); owner_self = false;
+    }
+    void adopt_member(const Member& mem) {
+        members[mem.steamid] = mem.persona;
+        if (!mem.metadata.empty()) member_metadata[mem.steamid] = mem.metadata;
     }
 };
 
