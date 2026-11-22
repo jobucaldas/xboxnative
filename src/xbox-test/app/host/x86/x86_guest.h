@@ -498,6 +498,7 @@ struct Guest {
             uintptr_t native_event = 0;
             uintptr_t aux_event = 0;
             bool is_thread = false;
+            bool is_process = false;  // this process (pseudo handle or OpenProcess): never signaled while it runs
         };
         const bool native_active=native_event_backend_active();
         WaitEntry entries[64]{};
@@ -505,6 +506,7 @@ struct Guest {
             uint32_t h=mem.r32(handles+i*4);
             entries[i].handle=h;
             if(thread_ids.count(h)||thread_exit_codes.count(h)){entries[i].is_thread=true;continue;}
+            if(h==0xFFFFFFFFu||process_handles.count(h)){entries[i].is_process=true;continue;}
             auto it=sync_handles.find(h);
             if(it==sync_handles.end()||!sync_objects.count(it->second)){set_last_error(6);return 0xffffffffu;}
             entries[i].object_id=it->second;
@@ -519,13 +521,15 @@ struct Guest {
             for(uint32_t i=0;i<count;++i){
                 for(uint32_t j=i+1;j<count;++j){
                     if(entries[i].is_thread&&entries[j].is_thread&&entries[i].handle==entries[j].handle){set_last_error(87);return 0xffffffffu;}
-                    if(!entries[i].is_thread&&!entries[j].is_thread&&entries[i].object_id==entries[j].object_id){set_last_error(87);return 0xffffffffu;}
+                    if(entries[i].is_process&&entries[j].is_process){set_last_error(87);return 0xffffffffu;}
+                    if(!entries[i].is_thread&&!entries[j].is_thread&&!entries[i].is_process&&!entries[j].is_process&&entries[i].object_id==entries[j].object_id){set_last_error(87);return 0xffffffffu;}
                 }
             }
         }
         uint32_t tid=c.fs_base?mem.r32(c.fs_base+0x24):0u; if(!tid)tid=1u;
         auto guest_ready = [&](const WaitEntry& e) -> bool {
             if(e.is_thread)return true;
+            if(e.is_process)return false;
             const auto& o=sync_objects[e.object_id];
             if(o.kind==SyncKind::Event)return o.signaled;
             if(o.kind==SyncKind::Semaphore)return o.count!=0;
@@ -2136,7 +2140,13 @@ inline void Guest::register_all() {
 #endif
     });
     reg.add("kernel32.dll", "ExitProcess", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(0)); return 0; });
-    reg.add("kernel32.dll", "TerminateProcess", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t { do_exit(c, c.arg(1)); return 1; });
+    reg.add("kernel32.dll", "TerminateProcess", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+        if (c.arg(0) != 0xFFFFFFFFu && !process_handles.count(c.arg(0))) { set_last_error(6); return 0; }
+        do_exit(c, c.arg(1)); return 1; });
+    // Only this process exists: its pseudo handle and OpenProcess handles answer its id.
+    reg.add("kernel32.dll", "GetProcessId", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        if (c.arg(0) != 0xFFFFFFFFu && !process_handles.count(c.arg(0))) { set_last_error(6); return 0; }
+        return process_id; });
     // Yield points of the cooperative scheduler: run pending bodies, then wait
     // for the remainder of the requested real-time interval. A worker can consume
     // part of the caller's interval while it runs (Bugbot 4561794148).
@@ -2186,16 +2196,23 @@ inline void Guest::register_all() {
         bool ran = !pending_threads.empty(); run_pending_threads(c); return ran ? 1u : 0u; });
     // Timed waits share the same deadline accounting as Sleep: pending guest
     // bodies run first, and only the unconsumed part of the timeout is waited.
-    reg.add("kernel32.dll", "WaitForSingleObject", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
+    // This process is alive and never signals: a wait on it times out; an infinite one cannot complete (fail closed).
+    auto wait_self=[this](Cpu& c,uint32_t timeout,Clock::time_point deadline)->uint32_t{
+        if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForSingleObject: infinite wait on this process");
+        if(timeout)sleep_until(deadline);
+        return 258u; };
+    reg.add("kernel32.dll", "WaitForSingleObject", Conv::Stdcall, 2, [this,wait_self](Cpu& c) -> uint32_t {
         uint32_t h=c.arg(0), timeout=c.arg(1); auto deadline=timeout==0xffffffffu?Clock::time_point{}:Clock::now()+std::chrono::milliseconds(timeout);
         run_pending_threads(c);
         if(thread_ids.count(h)||thread_exit_codes.count(h))return 0;
+        if(h==0xFFFFFFFFu||process_handles.count(h))return wait_self(c,timeout,deadline);
         if(!sync_handles.count(h)){set_last_error(6);return 0xffffffffu;}
         uint32_t result=sync_wait(c,h,remaining_timeout(deadline,timeout));if(result==0xffffffffu)set_last_error(6);return result; });
-    reg.add("kernel32.dll", "WaitForSingleObjectEx", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+    reg.add("kernel32.dll", "WaitForSingleObjectEx", Conv::Stdcall, 3, [this,wait_self](Cpu& c) -> uint32_t {
         uint32_t h=c.arg(0), timeout=c.arg(1); auto deadline=timeout==0xffffffffu?Clock::time_point{}:Clock::now()+std::chrono::milliseconds(timeout);
         run_pending_threads(c);
         if(thread_ids.count(h)||thread_exit_codes.count(h))return 0;
+        if(h==0xFFFFFFFFu||process_handles.count(h))return wait_self(c,timeout,deadline);
         if(!sync_handles.count(h)){set_last_error(6);return 0xffffffffu;}
         uint32_t result=sync_wait(c,h,remaining_timeout(deadline,timeout));if(result==0xffffffffu)set_last_error(6);return result; });
     auto wait_multiple = [this](Cpu& c, uint32_t timeout, bool wait_all, bool allow_empty=false) -> uint32_t {
@@ -2229,7 +2246,13 @@ inline void Guest::register_all() {
         // share the process handle namespace and receive an independently closable value.
         auto it=sync_handles.find(c.arg(1));
         if(it!=sync_handles.end()) { if(!c.arg(3)){set_last_error(87);return 0;} mem.w32(c.arg(3),add_sync_handle(it->second)); }
-        else if (c.arg(3)) mem.w32(c.arg(3), c.arg(1));
+        else if (c.arg(3)) {
+            // A process handle gets its own closable value, so closing the duplicate leaves the source valid.
+            const bool self = c.arg(1) == 0xFFFFFFFFu || process_handles.count(c.arg(1));
+            uint32_t h = c.arg(1);
+            if (self) { h = 0x78000000u + (++process_handle_serial); process_handles.insert(h); }
+            mem.w32(c.arg(3), h);
+        }
         return 1; });
     // Condition variables: single-threaded surface — init zero-fills, wakes are
     // no-ops, and a sleep runs pending thread bodies then succeeds.
@@ -3745,21 +3768,34 @@ inline void Guest::register_all() {
         if(!out_a.empty())mem.write_bytes(c.arg(3),out_a.data(),uint32_t(out_a.size()));
         mem.w8(c.arg(3)+uint32_t(out_a.size()),0);
         set_last_error(0);return uint32_t(q.value); });
-    reg.add("kernel32.dll", "GetDiskFreeSpaceW", Conv::Stdcall, 5, [this](Cpu& c) -> uint32_t {
-        if(!c.arg(0)){set_last_error(87);return 0;}
-        Host::FileCall q{Host::FileCall::Kind::DiskFreeW};q.path_w=wstr(c.arg(0));
+    // A NULL lpRootPathName means the root of the current directory's volume (MSDN), not an invalid parameter.
+    auto cwd_root=[this](std::u16string& root)->bool{
+        Host::FileCall d{Host::FileCall::Kind::GetCurrentDirectoryW};d.args[0]=32768;
+        if(!call_file(d)||d.data.size()<2){set_last_error(d.error?d.error:120);return false;}
+        std::u16string cwd;
+        for(size_t i=0;i+1<d.data.size();i+=2){uint16_t ch=uint16_t(d.data[i])|uint16_t(d.data[i+1])<<8;if(!ch)break;cwd.push_back(char16_t(ch));}
+        if(cwd.size()>=2&&cwd[1]==u':')root=cwd.substr(0,2)+u"\\";
+        else if(cwd.size()>=2&&cwd[0]==u'\\'&&cwd[1]==u'\\'){  // UNC: keep \\server\share and add the trailing separator
+            const size_t server=cwd.find(u'\\',2),share=server==std::u16string::npos?server:cwd.find(u'\\',server+1);
+            root=(share==std::u16string::npos?cwd:cwd.substr(0,share))+u"\\";
+        }else root=cwd;
+        return true; };
+    reg.add("kernel32.dll", "GetDiskFreeSpaceW", Conv::Stdcall, 5, [this,cwd_root](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::DiskFreeW};
+        if(c.arg(0))q.path_w=wstr(c.arg(0));else if(!cwd_root(q.path_w))return 0;
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}
         for(unsigned i=0;i<4;++i)if(c.arg(i+1))mem.w32(c.arg(i+1),q.args[i]);
         set_last_error(0);return 1; });
-    reg.add("kernel32.dll", "GetDiskFreeSpaceA", Conv::Stdcall, 5, [this,decode_ansi](Cpu& c) -> uint32_t {
-        if(!c.arg(0)){set_last_error(87);return 0;}
-        Host::FileCall q{Host::FileCall::Kind::DiskFreeW};q.path_w=decode_ansi(str(c.arg(0)));
+    reg.add("kernel32.dll", "GetDiskFreeSpaceA", Conv::Stdcall, 5, [this,decode_ansi,cwd_root](Cpu& c) -> uint32_t {
+        Host::FileCall q{Host::FileCall::Kind::DiskFreeW};
+        if(c.arg(0))q.path_w=decode_ansi(str(c.arg(0)));else if(!cwd_root(q.path_w))return 0;
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}
         for(unsigned i=0;i<4;++i)if(c.arg(i+1))mem.w32(c.arg(i+1),q.args[i]);
         set_last_error(0);return 1; });
-    for(bool wide:{false,true}){std::string name=wide?"GetDiskFreeSpaceExW":"GetDiskFreeSpaceExA";reg.add("kernel32.dll", name, Conv::Stdcall, 4, [this,wide](Cpu& c) -> uint32_t {
-        if(!c.arg(0)){set_last_error(87);return 0;}
-        Host::FileCall q{wide?Host::FileCall::Kind::DiskFreeExW:Host::FileCall::Kind::DiskFreeExA};if(wide)q.path_w=wstr(c.arg(0));else q.path_a=str(c.arg(0));
+    for(bool wide:{false,true}){std::string name=wide?"GetDiskFreeSpaceExW":"GetDiskFreeSpaceExA";reg.add("kernel32.dll", name, Conv::Stdcall, 4, [this,wide,cwd_root](Cpu& c) -> uint32_t {
+        // The wide kind serves the NULL root of either variant: the root comes from the wide current directory.
+        Host::FileCall q{wide||!c.arg(0)?Host::FileCall::Kind::DiskFreeExW:Host::FileCall::Kind::DiskFreeExA};
+        if(!c.arg(0)){if(!cwd_root(q.path_w))return 0;}else if(wide)q.path_w=wstr(c.arg(0));else q.path_a=str(c.arg(0));
         if(!call_file(q)||q.data.size()<24){set_last_error(q.error?q.error:120);return 0;}
         for(unsigned i=0;i<3;++i)if(c.arg(i+1))mem.write_bytes(c.arg(i+1),q.data.data()+8*i,8);
         set_last_error(0);return 1; });}

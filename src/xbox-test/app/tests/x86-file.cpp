@@ -68,6 +68,7 @@ int main() {
     host.destructive_file_guard=[&](const char* op,const std::u16string& p){last_guard_op=op?op:"";last_guard_path=p;return !refuse;};
     std::u16string last_createw_path,last_deleted_w; uint32_t last_createw_access=0,last_createw_share=0; unsigned close_count=0,createw_count=0;
     std::string mock_cwd="root";
+    std::u16string mock_cwd_w=u"root",last_df_w;std::string last_df_a;Host::FileCall::Kind ex_kind=Host::FileCall::Kind::DiskFreeW;
     std::vector<std::vector<uint8_t>> read_chunks; size_t read_idx=0;
     std::vector<uint8_t> written_bytes;
     host.file_call=[&](Host::FileCall& q){++calls;switch(q.kind){
@@ -99,7 +100,7 @@ int main() {
     case Host::FileCall::Kind::RemoveDirectoryA:CHECK(q.path_a=="folder");q.succeeded=true;break;
     case Host::FileCall::Kind::RemoveDirectoryW:CHECK(q.path_w==u"folder");q.succeeded=true;break;
     case Host::FileCall::Kind::GetCurrentDirectoryA:q.data.assign(mock_cwd.begin(),mock_cwd.end());q.data.push_back(0);q.value=uint32_t(mock_cwd.size());q.succeeded=true;break;
-    case Host::FileCall::Kind::GetCurrentDirectoryW:q.data.assign(10,0);q.data[0]='r';q.data[2]='o';q.data[4]='o';q.data[6]='t';q.value=4;q.succeeded=true;break;
+    case Host::FileCall::Kind::GetCurrentDirectoryW:q.data.assign((mock_cwd_w.size()+1)*2,0);memcpy(q.data.data(),mock_cwd_w.data(),mock_cwd_w.size()*2);q.value=uint32_t(mock_cwd_w.size());q.succeeded=true;break;
     case Host::FileCall::Kind::SetCurrentDirectoryA:CHECK(q.path_a=="folder");q.succeeded=true;break;
     case Host::FileCall::Kind::SetCurrentDirectoryW:CHECK(q.path_w==u"folder");q.succeeded=true;break;
     case Host::FileCall::Kind::FindFirstA:case Host::FileCall::Kind::FindFirstExA:if(q.path_a=="missing"){q.error=2;break;}q.value=native_handle+2;q.data.assign(320,0x41);q.succeeded=true;break;
@@ -117,8 +118,8 @@ int main() {
         const std::u16string name=q.path_w+q.path2_w+u"1234.tmp";
         q.data.resize(name.size()*2);memcpy(q.data.data(),name.data(),name.size()*2);
         q.value=0x1234;q.succeeded=true;break;}
-    case Host::FileCall::Kind::DiskFreeW:if(q.path_w==u"Z:\\"){q.error=21;break;}CHECK(q.path_w==u"C:\\");q.args[0]=8;q.args[1]=512;q.args[2]=100;q.args[3]=200;q.succeeded=true;break;
-    case Host::FileCall::Kind::DiskFreeExA:case Host::FileCall::Kind::DiskFreeExW:{if(q.path_a=="Z:\\"||q.path_w==u"Z:\\"){q.error=21;break;}uint64_t v[3]={1000,2000,3000};q.data.resize(24);memcpy(q.data.data(),v,24);q.succeeded=true;break;}
+    case Host::FileCall::Kind::DiskFreeW:last_df_w=q.path_w;if(q.path_w.empty()){q.error=3;break;}if(q.path_w==u"Z:\\"){q.error=21;break;}q.args[0]=8;q.args[1]=512;q.args[2]=100;q.args[3]=200;q.succeeded=true;break;
+    case Host::FileCall::Kind::DiskFreeExA:case Host::FileCall::Kind::DiskFreeExW:{last_df_w=q.path_w;last_df_a=q.path_a;ex_kind=q.kind;if(q.path_a.empty()&&q.path_w.empty()){q.error=3;break;}if(q.path_a=="Z:\\"||q.path_w==u"Z:\\"){q.error=21;break;}uint64_t v[3]={1000,2000,3000};q.data.resize(24);memcpy(q.data.data(),v,24);q.succeeded=true;break;}
     case Host::FileCall::Kind::DriveTypeW:if(q.path_w==u"Z:\\"){q.error=21;break;}q.value=3;q.succeeded=true;break;
     }};
     auto call=[&](const char* n,std::initializer_list<uint32_t> a){unsigned i=0;for(uint32_t v:a)mem.w32(cpu.reg[ESP]+4+4*i++,v);return reg.map.at({std::string(n).rfind("co",0)==0?"ole32.dll":"kernel32.dll",n}).fn(cpu);};
@@ -281,16 +282,40 @@ int main() {
     CHECK(kcall("lzclose",{h2})==0&&kcall("_lclose",{h2})==0xffffffffu&&g.last_error()==6);
     CHECK(kcall("_lclose",{h1})==0&&kcall("_lclose",{h1})==0xffffffffu);
     uint32_t c_w=g.put_wstr(u"C:\\"),z_w=g.put_wstr(u"Z:\\"),c_a=g.put_str("C:\\"),z_a=g.put_str("Z:\\");
-    CHECK(kcall("getdiskfreespacew",{c_w,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&mem.r32(0x3c90)==8&&mem.r32(0x3c94)==512&&mem.r32(0x3c98)==100&&mem.r32(0x3c9c)==200);
+    CHECK(kcall("getdiskfreespacew",{c_w,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&mem.r32(0x3c90)==8&&mem.r32(0x3c94)==512&&mem.r32(0x3c98)==100&&mem.r32(0x3c9c)==200&&last_df_w==u"C:\\");
     CHECK(kcall("getdiskfreespacew",{z_w,0x3c90,0,0,0})==0&&g.last_error()==21);
-    CHECK(kcall("getdiskfreespacew",{0,0,0,0,0})==0&&g.last_error()==87);
-    CHECK(kcall("getdiskfreespacea",{c_a,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&mem.r32(0x3c90)==8&&mem.r32(0x3c94)==512&&mem.r32(0x3c98)==100&&mem.r32(0x3c9c)==200);
-    CHECK(kcall("getdiskfreespacea",{c_a,0,0,0,0x3c9c})==1&&mem.r32(0x3c9c)==200);   // NULL outputs are skipped
+    // NULL lpRootPathName is the root of the current directory's volume, not ERROR_INVALID_PARAMETER; "" is a real (failing) path, ERROR_PATH_NOT_FOUND.
+    const uint32_t empty_w=g.put_wstr(u""),empty_a=g.put_str("");
+    const std::u16string saved_cwd_w=mock_cwd_w;
+    mock_cwd_w=u"C:\\dir\\sub";last_df_w=u"?";
+    CHECK(kcall("getdiskfreespacew",{0,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&last_df_w==u"C:\\"&&mem.r32(0x3c90)==8&&mem.r32(0x3c9c)==200);
+    mock_cwd_w=u"\\\\srv\\share\\dir";
+    CHECK(kcall("getdiskfreespacew",{0,0,0,0,0})==1&&last_df_w==u"\\\\srv\\share\\"&&g.last_error()==0);
+    mock_cwd_w=u"\\\\srv\\share";
+    CHECK(kcall("getdiskfreespacew",{0,0,0,0,0})==1&&last_df_w==u"\\\\srv\\share\\");
+    mock_cwd_w=u"Z:\\x";
+    CHECK(kcall("getdiskfreespacew",{0,0,0,0,0})==0&&g.last_error()==21&&last_df_w==u"Z:\\");  // NULL on a failing volume reports that volume's error
+    mock_cwd_w=saved_cwd_w;
+    CHECK(kcall("getdiskfreespacew",{empty_w,0,0,0,0})==0&&g.last_error()==3&&last_df_w.empty());
+    CHECK(kcall("getdiskfreespacea",{c_a,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&last_df_w==u"C:\\"&&mem.r32(0x3c90)==8&&mem.r32(0x3c94)==512&&mem.r32(0x3c98)==100&&mem.r32(0x3c9c)==200);
+    CHECK(kcall("getdiskfreespacea",{c_a,0,0,0,0x3c9c})==1&&last_df_w==u"C:\\"&&mem.r32(0x3c9c)==200);   // NULL outputs are skipped
     CHECK(kcall("getdiskfreespacea",{z_a,0x3c90,0,0,0})==0&&g.last_error()==21);
-    CHECK(kcall("getdiskfreespacea",{0,0,0,0,0})==0&&g.last_error()==87);
+    mock_cwd_w=u"C:\\dir";last_df_w=u"?";
+    CHECK(kcall("getdiskfreespacea",{0,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&last_df_w==u"C:\\"&&mem.r32(0x3c90)==8&&mem.r32(0x3c9c)==200);
+    mock_cwd_w=saved_cwd_w;
+    CHECK(kcall("getdiskfreespacea",{empty_a,0,0,0,0})==0&&g.last_error()==3&&last_df_w.empty());
     CHECK(kcall("getdiskfreespaceexa",{c_a,0x3ca0,0x3ca8,0x3cb0})==1&&mem.r32(0x3ca0)==1000&&mem.r32(0x3ca4)==0&&mem.r32(0x3ca8)==2000&&mem.r32(0x3cb0)==3000);
     CHECK(kcall("getdiskfreespaceexw",{c_w,0x3ca0,0,0})==1&&mem.r32(0x3ca0)==1000);
     CHECK(kcall("getdiskfreespaceexa",{z_a,0x3ca0,0,0})==0&&g.last_error()==21);
+    // Ex: NULL is the current directory's volume for both variants (served by the wide host call); "" is ERROR_PATH_NOT_FOUND; a failing volume keeps its error.
+    mock_cwd_w=u"C:\\dir\\sub";last_df_w=u"?";last_df_a="?";
+    CHECK(kcall("getdiskfreespaceexw",{0,0x3ca0,0x3ca8,0x3cb0})==1&&ex_kind==Host::FileCall::Kind::DiskFreeExW&&last_df_w==u"C:\\"&&mem.r32(0x3ca0)==1000&&mem.r32(0x3cb0)==3000);
+    last_df_w=u"?";
+    CHECK(kcall("getdiskfreespaceexa",{0,0x3ca0,0,0})==1&&ex_kind==Host::FileCall::Kind::DiskFreeExW&&last_df_w==u"C:\\"&&g.last_error()==0);
+    mock_cwd_w=u"Z:\\x";
+    CHECK(kcall("getdiskfreespaceexa",{0,0,0,0})==0&&g.last_error()==21&&kcall("getdiskfreespaceexw",{0,0,0,0})==0&&g.last_error()==21);
+    mock_cwd_w=saved_cwd_w;
+    CHECK(kcall("getdiskfreespaceexw",{empty_w,0,0,0})==0&&g.last_error()==3&&kcall("getdiskfreespaceexa",{empty_a,0,0,0})==0&&g.last_error()==3);
     CHECK(kcall("getdrivetypew",{c_w})==3&&kcall("getdrivetypew",{z_w})==0&&kcall("getdrivetypew",{0})==0);
     CHECK(kcall("createhardlinka",{dst_a,src_a,0})==0&&g.last_error()==50);
     CHECK(kcall("createhardlinkw",{dst_w,src_w,0})==0&&g.last_error()==50);

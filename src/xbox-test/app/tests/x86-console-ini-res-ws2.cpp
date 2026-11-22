@@ -50,6 +50,36 @@ int main() {
     CHECK(call("kernel32.dll","closehandle",{proc})==1&&call("kernel32.dll","getexitcodeprocess",{proc,nread})==0&&g.last_error()==6);
     CHECK(call("kernel32.dll","openprocess",{0x1fffffu,0,self+4})==0&&g.last_error()==87);
     CHECK(call("kernel32.dll","openprocess",{0x1fffffu,0,0})==0&&g.last_error()==87);
+    // Process handles (pseudo -1 or OpenProcess): GetProcessId, a distinct DuplicateHandle, waits that time out, and handle validation.
+    const uint32_t out=0x3500,list=0x3510;
+    CHECK(call("kernel32.dll","getprocessid",{0xffffffffu})==self);
+    CHECK(call("kernel32.dll","getprocessid",{0x10})==0&&g.last_error()==6);
+    proc=call("kernel32.dll","openprocess",{0x1fffffu,0,self});
+    CHECK(call("kernel32.dll","getprocessid",{proc})==self);
+    CHECK(call("kernel32.dll","duplicatehandle",{0xffffffffu,proc,0xffffffffu,out,0,0,2})==1);
+    const uint32_t dup=mem.r32(out);
+    CHECK(dup!=0&&dup!=proc&&dup!=0xffffffffu&&call("kernel32.dll","getprocessid",{dup})==self);
+    CHECK(call("kernel32.dll","closehandle",{dup})==1);
+    CHECK(call("kernel32.dll","getexitcodeprocess",{proc,nread})==1&&mem.r32(nread)==259&&call("kernel32.dll","getprocessid",{proc})==self);
+    CHECK(call("kernel32.dll","getprocessid",{dup})==0&&g.last_error()==6&&call("kernel32.dll","getexitcodeprocess",{dup,nread})==0&&g.last_error()==6);
+    CHECK(call("kernel32.dll","duplicatehandle",{0xffffffffu,0xffffffffu,0xffffffffu,out,0,0,2})==1);
+    const uint32_t pseudo_dup=mem.r32(out);
+    CHECK(pseudo_dup!=0xffffffffu&&pseudo_dup!=dup&&call("kernel32.dll","getprocessid",{pseudo_dup})==self&&call("kernel32.dll","closehandle",{pseudo_dup})==1);
+    CHECK(call("kernel32.dll","getprocessid",{pseudo_dup})==0&&g.last_error()==6&&call("kernel32.dll","getprocessid",{0xffffffffu})==self);
+    // A live process never signals: timeout 0 is WAIT_TIMEOUT (258), a finite wait ends in 258, an unknown handle is ERROR_INVALID_HANDLE, an infinite wait fails closed.
+    CHECK(call("kernel32.dll","waitforsingleobject",{0xffffffffu,0})==258&&call("kernel32.dll","waitforsingleobject",{proc,0})==258&&call("kernel32.dll","waitforsingleobjectex",{proc,0,0})==258);
+    CHECK(call("kernel32.dll","waitforsingleobject",{proc,1})==258);
+    CHECK(call("kernel32.dll","waitforsingleobject",{0x10,0})==0xffffffffu&&g.last_error()==6);
+    bool infinite_faulted=false;
+    try{call("kernel32.dll","waitforsingleobject",{proc,0xffffffffu});}catch(const Fault&){infinite_faulted=true;}
+    CHECK(infinite_faulted);
+    mem.w32(list,0xffffffffu);mem.w32(list+4,proc);
+    CHECK(call("kernel32.dll","waitformultipleobjects",{2,list,0,0})==258&&call("kernel32.dll","waitformultipleobjects",{2,list,1,0})==0xffffffffu&&g.last_error()==87);
+    CHECK(call("kernel32.dll","waitformultipleobjects",{1,list,1,0})==258);
+    mem.w32(list+4,0xffffffffu);
+    CHECK(call("kernel32.dll","waitformultipleobjects",{2,list,1,0})==0xffffffffu&&g.last_error()==87);
+    CHECK(call("kernel32.dll","terminateprocess",{0x10,1})==0&&g.last_error()==6);
+    CHECK(call("kernel32.dll","closehandle",{proc})==1&&call("kernel32.dll","getprocessid",{proc})==0&&g.last_error()==6&&call("kernel32.dll","waitforsingleobject",{proc,0})==0xffffffffu&&g.last_error()==6);
     // UnmapViewOfFile accepts views mapped via NtMapViewOfSection and rejects non-view addresses with ERROR_INVALID_ADDRESS.
     CHECK(call("kernel32.dll","unmapviewoffile",{0x400000})==0&&g.last_error()==487);
     CHECK(call("kernel32.dll","unmapviewoffile",{0})==0&&g.last_error()==487);
