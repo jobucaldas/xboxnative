@@ -193,6 +193,31 @@ clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-prot
 lld-link-19 /nodefaultlib /include:provider_relocation /dll /entry:DllMain /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-leaderboard-provider.dll" /implib:"$out/obj/provider.lib" "$out/obj/leaderboard-provider.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
 clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-leaderboard.cpp -o "$out/obj/leaderboard.obj"
 lld-link-19 /nodefaultlib /entry:lb_entry /include:lb_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-leaderboard.exe" "$out/obj/leaderboard.obj" "$out/obj/steam-api.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
+# Steam lobbies (steam_matchmaking.h): a guest that uses ISteamMatchmaking and
+# pumps callbacks with SteamAPI_ManualDispatch_*, against a provider stand-in
+# (our own code, gbe_fork's handle and queue behaviour, never its binary).
+cat > "$out/obj/lobby-api.def" <<'DEF'
+LIBRARY steam_api64.dll
+EXPORTS
+ SteamAPI_GetHSteamPipe
+ SteamAPI_ManualDispatch_Init
+ SteamAPI_ManualDispatch_RunFrame
+ SteamAPI_ManualDispatch_GetNextCallback
+ SteamAPI_ManualDispatch_FreeLastCallback
+ SteamAPI_ManualDispatch_GetAPICallResult
+ SteamAPI_ISteamMatchmaking_CreateLobby
+ SteamAPI_ISteamMatchmaking_RequestLobbyList
+ SteamAPI_ISteamMatchmaking_GetLobbyByIndex
+ SteamAPI_ISteamMatchmaking_JoinLobby
+ SteamAPI_ISteamMatchmaking_LeaveLobby
+ PlayLobbyCalls
+ PlayLobbyProviderLobby
+DEF
+llvm-dlltool-19 -m i386:x86-64 -d "$out/obj/lobby-api.def" -l "$out/obj/lobby-api.lib"
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-lobby-provider.cpp -o "$out/obj/lobby-provider.obj"
+lld-link-19 /nodefaultlib /include:provider_relocation /dll /entry:DllMain /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-lobby-provider.dll" /implib:"$out/obj/lobby-provider.lib" "$out/obj/lobby-provider.obj" "$MINGW_SYSROOT"/lib/libkernel32.a
+clang++-19 --target=x86_64-w64-windows-gnu -fno-emulated-tls -O1 -fno-stack-protector -c tests/play-lobby.cpp -o "$out/obj/lobby.obj"
+lld-link-19 /nodefaultlib /entry:lobby_entry /include:lobby_relocation /subsystem:windows,6.02 /appcontainer /dynamicbase /nxcompat /out:"$out/play-lobby.exe" "$out/obj/lobby.obj" "$out/obj/lobby-api.lib" "$MINGW_SYSROOT"/lib/libkernel32.a
 # A static import from a DLL whose own mapping fails must stay unresolved: the
 # failed image is never published to resolve the importer (never executed).
 # baselib.dll is a game-DLL (uwph-routed) name, the route Megabonk exercised.
@@ -315,6 +340,23 @@ PLAY_LB_SAVE_PATH=$(winepath -w "$lb/saves") PLAY_LB_APPID=3405340 \
 PRUN_STEAM_PROVIDER=$(winepath -w "$lb/steam_api64.dll") PRUN_LB_SAVES=$(winepath -w "$lb/saves") PRUN_LB_APPID=3405340 \
  WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" leaderboards > "$out/leaderboards.log" 2>&1
 tail -1 "$out/leaderboards.log"
+# Steam lobbies run on their own too, against the lobby provider stand-in: Play maps
+# it in place of the guest's own steam_api64.dll, with the launcher's lobby tap
+# installed over a fake CM.
+lobby="$out/lobbies"; rm -rf "$lobby"; mkdir -p "$lobby"
+cp "$out/play-lobby-provider.dll" "$lobby/steam_api64.dll"
+PRUN_STEAM_PROVIDER=$(winepath -w "$lobby/steam_api64.dll") \
+ WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine "$out/play-runner.exe" lobbies > "$out/lobbies.log" 2>&1
+tail -1 "$out/lobbies.log"
+# Control: the same guest and provider under the ordinary loader, no Play and no
+# tap. Every call is the provider's, so this proves the stand-in itself behaves
+# like gbe_fork (handles counted up from 100, never the top bit) before the run
+# above is read as proof about Play.
+lobby_control="$out/lobbies-control"; rm -rf "$lobby_control"; mkdir -p "$lobby_control"
+cp "$out/play-lobby-provider.dll" "$lobby_control/steam_api64.dll"; cp "$out/play-lobby.exe" "$lobby_control/"
+lobby_control_code=0
+(cd "$lobby_control" && PLAY_LOBBY_EXPECT=passthrough WINEDEBUG=-all WINEDLLOVERRIDES=winedbg.exe=d timeout -k 2 ${PRUN_MODE_TIMEOUT:-20} wine play-lobby.exe) > "$out/lobbies-control.log" 2>&1 || lobby_control_code=$?
+echo "lobbies control exit $lobby_control_code"
 # The root copy was only for this run: later modes prove what happens when a
 # game root has no steam_api64.dll of its own.
 rm -f "$out/steam_api64.dll"
@@ -408,6 +450,22 @@ grep -q "STEAM persona: 3 of 3 leaderboard names resolved" "$out/leaderboards.lo
 grep -q "STEAM leaderboards: 'v2_kills' refreshed 4 rows (id 7, 4 on Steam)" "$out/leaderboards.log"
 # Counts only: no persona name and no SteamID may reach the log.
 if grep -qE "Player (Two|Three|Four)|Fixture Owner|1100001000" "$out/leaderboards.log";then exit 1;fi
+# Steam lobbies: the hooks sit on the provider's ManualDispatch and ISteamMatchmaking
+# exports. The guest exits 42 only when the provider kept every call made before
+# ManualDispatch_Init, the launcher answered every call after it (launcher handles
+# the provider never saw, results from the fake CM) and the provider's own queued
+# callbacks arrived once each. The runner checks the fake CM served each request
+# once; the control run proves the provider stand-in alone passes everything through.
+[[ $lobby_control_code == 42 ]]
+grep -q "PRUN matchmaking tap staged" "$out/lobbies.log"
+for hooked in SteamAPI_ManualDispatch_Init SteamAPI_GetHSteamPipe SteamAPI_ManualDispatch_GetNextCallback SteamAPI_ManualDispatch_FreeLastCallback SteamAPI_ManualDispatch_GetAPICallResult SteamAPI_ISteamMatchmaking_CreateLobby SteamAPI_ISteamMatchmaking_RequestLobbyList SteamAPI_ISteamMatchmaking_GetLobbyByIndex SteamAPI_ISteamMatchmaking_JoinLobby SteamAPI_ISteamMatchmaking_LeaveLobby;do
+  grep -q "STEAM matchmaking: $hooked observed; the provider answers unless the launcher installed a lobby tap" "$out/lobbies.log"
+done
+grep -q "PLAY-LOBBIES creates=1 lists=1 joins=1 leaves=1" "$out/lobbies.log"
+grep -q "STEAM lobbies: created lobby#" "$out/lobbies.log"
+grep -q "STEAM lobbies: joined lobby#" "$out/lobbies.log"
+# Counts only: no persona name and no full lobby or SteamID may reach the log.
+if grep -qE "Fixture Owner|1100001000|110000100000" "$out/lobbies.log";then exit 1;fi
 # Vulkan (issue #177): a guest's LoadLibrary("vulkan-1.dll") is served by the Khronos loader from the
 # runtime directory, and Play must have listed the packaged ICD manifests in the guest registry, which is the route
 # the loader reads (VK_DRIVER_FILES is ignored at the process's integrity level).

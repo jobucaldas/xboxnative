@@ -20,6 +20,7 @@
 #include "../../uwph/vcruntime/route.h"
 #include "steam_app_ticket.h"
 #include "../steam_host.h"
+#include "../steam_matchmaking.h"
 #include "redact.h"
 #include "../../shared/rwx_emulation.h"
 #include "../../shared/vulkan_driver_registry.h"
@@ -892,6 +893,115 @@ static uintptr_t personaHook(const char* name,uintptr_t real) {
     }
     return 0;
 }
+// ---- Lobbies the game asks for through the Steam API provider
+// (steam_matchmaking.h). gbe_fork answers ISteamMatchmaking from its own LAN peer
+// network and owns the callback queue the game reads, so a CM answer can only
+// reach a game that pumps with SteamAPI_ManualDispatch_*: the launcher keeps its
+// own queue and splices it into those four exports. The decision logic lives in
+// steam_matchmaking.h (portable, tested natively); this is only the export glue.
+// With no tap installed, or for a game that never called ManualDispatch_Init,
+// every hooked export calls the provider's own with the same arguments and
+// returns its answer, so a SteamAPI_RunCallbacks game never receives a launcher
+// handle that nothing would complete. The tap must be installed before the game
+// calls ManualDispatch_Init and SteamAPI_GetHSteamPipe, which it observes.
+struct MatchmakingTap {
+    std::shared_ptr<steam_matchmaking::Service> service;
+};
+static steam_matchmaking::Hub matchmakingHub;
+// Clearing (a null service) closes the previous launch's queue: what it held is
+// dropped and calls still in flight finish without posting. A hook already
+// running holds its own reference to the service, so it never sees it freed.
+static void set_matchmaking_tap(MatchmakingTap tap) {
+    matchmakingHub.set(std::move(tap.service));
+}
+static std::atomic<uintptr_t> matchmakingRealInit{0}, matchmakingRealPipe{0}, matchmakingRealNext{0},
+    matchmakingRealFree{0}, matchmakingRealResult{0}, matchmakingRealCreate{0}, matchmakingRealList{0},
+    matchmakingRealIndex{0}, matchmakingRealJoin{0}, matchmakingRealLeave{0};
+static uintptr_t matchmakingHook(const char* name,uintptr_t real) {
+    if(!real) return 0;
+    if(!strcmp(name,"SteamAPI_ManualDispatch_Init")) {
+        using Fn=steam_matchmaking::InitFn;
+        matchmakingRealInit.store(real,std::memory_order_release);
+        static Fn hook=[](){
+            matchmakingHub.init((Fn)matchmakingRealInit.load(std::memory_order_acquire));
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_GetHSteamPipe")) {
+        using Fn=steam_matchmaking::PipeFn;
+        matchmakingRealPipe.store(real,std::memory_order_release);
+        static Fn hook=[]()->int32_t{
+            return matchmakingHub.pipe((Fn)matchmakingRealPipe.load(std::memory_order_acquire));
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ManualDispatch_GetNextCallback")) {
+        using Fn=steam_matchmaking::NextFn;
+        matchmakingRealNext.store(real,std::memory_order_release);
+        static Fn hook=[](int32_t pipe,steam_matchmaking::CallbackMsg_t* msg)->bool{
+            return matchmakingHub.next((Fn)matchmakingRealNext.load(std::memory_order_acquire),pipe,msg);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ManualDispatch_FreeLastCallback")) {
+        using Fn=steam_matchmaking::FreeFn;
+        matchmakingRealFree.store(real,std::memory_order_release);
+        static Fn hook=[](int32_t pipe){
+            matchmakingHub.free_last((Fn)matchmakingRealFree.load(std::memory_order_acquire),pipe);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ManualDispatch_GetAPICallResult")) {
+        using Fn=steam_matchmaking::ResultFn;
+        matchmakingRealResult.store(real,std::memory_order_release);
+        static Fn hook=[](int32_t pipe,uint64_t call,void* buffer,int cub,int expected,bool* failed)->bool{
+            return matchmakingHub.api_call_result((Fn)matchmakingRealResult.load(std::memory_order_acquire),
+                                                  pipe,call,buffer,cub,expected,failed);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamMatchmaking_CreateLobby")) {
+        using Fn=steam_matchmaking::CreateFn;
+        matchmakingRealCreate.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,int type,int max)->uint64_t{
+            return matchmakingHub.create_lobby((Fn)matchmakingRealCreate.load(std::memory_order_acquire),self,type,max);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamMatchmaking_RequestLobbyList")) {
+        using Fn=steam_matchmaking::ListFn;
+        matchmakingRealList.store(real,std::memory_order_release);
+        static Fn hook=[](void* self)->uint64_t{
+            return matchmakingHub.request_lobby_list((Fn)matchmakingRealList.load(std::memory_order_acquire),self);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamMatchmaking_GetLobbyByIndex")) {
+        using Fn=steam_matchmaking::ByIndexFn;
+        matchmakingRealIndex.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,int index)->uint64_t{
+            return matchmakingHub.lobby_by_index((Fn)matchmakingRealIndex.load(std::memory_order_acquire),self,index);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamMatchmaking_JoinLobby")) {
+        using Fn=steam_matchmaking::JoinFn;
+        matchmakingRealJoin.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby)->uint64_t{
+            return matchmakingHub.join_lobby((Fn)matchmakingRealJoin.load(std::memory_order_acquire),self,lobby);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SteamAPI_ISteamMatchmaking_LeaveLobby")) {
+        using Fn=steam_matchmaking::LeaveFn;
+        matchmakingRealLeave.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby){
+            matchmakingHub.leave_lobby((Fn)matchmakingRealLeave.load(std::memory_order_acquire),self,lobby);
+        };
+        return (uintptr_t)hook;
+    }
+    return 0;
+}
 static uintptr_t steamApiExport(Module& module,const char* name,uintptr_t address) {
     if(!address||!name||strcmp(module.key.c_str(),"steam_api64.dll")) return address;
     // The provider image is the only image whose exports reach here, so it is
@@ -915,6 +1025,11 @@ static uintptr_t steamApiExport(Module& module,const char* name,uintptr_t addres
     if(auto hook=personaHook(name,address)) {
         if(state->log&&mlp::first_report(std::string("steam persona ")+name))
             state->log((std::string("STEAM persona: ")+name+" observed; names come from the launcher's Steam session").c_str());
+        return hook;
+    }
+    if(auto hook=matchmakingHook(name,address)) {
+        if(state->log&&mlp::first_report(std::string("steam matchmaking ")+name))
+            state->log((std::string("STEAM matchmaking: ")+name+" observed; the provider answers unless the launcher installed a lobby tap").c_str());
         return hook;
     }
     return address;
