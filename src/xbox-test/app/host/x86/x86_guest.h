@@ -3298,9 +3298,12 @@ inline void Guest::register_all() {
         set_last_error(5); return 0; });
     reg.add("kernel32.dll", "CreatePipe", Conv::Stdcall, 4, [this](Cpu&) -> uint32_t { set_last_error(50); return 0; });  // ERROR_NOT_SUPPORTED: no anonymous pipe route
     // The current-process pseudo handle (GetCurrentProcess) is still running; any other handle names no process here.
-    // The guest has no MapViewOfFile route and ReadFile/WriteFile refuse OVERLAPPED, so no view or I/O is ever started here.
-    // An address that is not a mapped view fails with ERROR_INVALID_ADDRESS, as on Windows.
-    reg.add("kernel32.dll", "UnmapViewOfFile", Conv::Stdcall, 1, [this](Cpu&) -> uint32_t { set_last_error(487); return 0; });
+    // Views mapped via ntdll!NtMapViewOfSection live in [0x64000000, section_top); UnmapViewOfFile delegates to the same
+    // no-op unmap semantics as NtUnmapViewOfSection and fails with ERROR_INVALID_ADDRESS for any other address.
+    reg.add("kernel32.dll", "UnmapViewOfFile", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
+        const uint32_t addr = c.arg(0);
+        if (addr >= 0x64000000u && addr < section_top) { set_last_error(0); return 1; }
+        set_last_error(487); return 0; });
     // OVERLAPPED is {Internal(NTSTATUS), InternalHigh(bytes), Offset.., hEvent}. A pending status is completed only by the
     // guest itself, through the event it supplied; there is no host I/O to wait on, so an unsignaled wait faults like WaitForSingleObject.
     reg.add("kernel32.dll", "GetOverlappedResult", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
@@ -3309,15 +3312,20 @@ inline void Guest::register_all() {
         uint32_t status=mem.r32(ov);
         if(status==0x103u){
             if(!c.arg(3)){set_last_error(996);return 0;}  // ERROR_IO_INCOMPLETE
-            const uint32_t ev=mem.r32(ov+16);
-            if(!sync_handles.count(ev))throw Fault(FaultKind::Unsupported,c.eip,c.eip,"GetOverlappedResult: wait on a request that cannot complete");
-            if(sync_wait(c,ev,0xffffffffu)!=0){set_last_error(6);return 0;}
+            run_pending_threads(c);
             status=mem.r32(ov);
+            if(status==0x103u){
+                const uint32_t ev=mem.r32(ov+16);
+                if(!sync_handles.count(ev))throw Fault(FaultKind::Unsupported,c.eip,c.eip,"GetOverlappedResult: wait on a request that cannot complete");
+                const uint32_t wr=sync_wait(c,ev,0xffffffffu);
+                if(wr!=0&&wr!=0x80u){set_last_error(6);return 0;}
+                status=mem.r32(ov);
+            }
         }
         mem.w32(out,mem.r32(ov+4));
-        if(status==0x103u){set_last_error(996);return 0;}  // woken but the guest never completed the request
+        if(status==0x103u){set_last_error(996);return 0;}  // woken but the guest never updated Internal from STATUS_PENDING
         if(status<0x80000000u){set_last_error(0);return 1;}
-        set_last_error(status==0xC0000011u?38u:status==0xC0000120u?995u:status==0xC000014Bu?109u:317u);  // EOF, cancelled, broken pipe; else ERROR_MR_MID_NOT_FOUND
+        set_last_error(status==0x80000005u?234u:status==0xC0000011u?38u:status==0xC0000120u?995u:status==0xC000014Bu?109u:317u);  // more data, EOF, cancelled, broken pipe; else ERROR_MR_MID_NOT_FOUND
         return 0; });
     reg.add("kernel32.dll", "GetExitCodeProcess", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         if (!c.arg(1)) { set_last_error(87); return 0; }

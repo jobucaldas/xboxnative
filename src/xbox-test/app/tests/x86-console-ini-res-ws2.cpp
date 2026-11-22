@@ -50,9 +50,15 @@ int main() {
     CHECK(call("kernel32.dll","closehandle",{proc})==1&&call("kernel32.dll","getexitcodeprocess",{proc,nread})==0&&g.last_error()==6);
     CHECK(call("kernel32.dll","openprocess",{0x1fffffu,0,self+4})==0&&g.last_error()==87);
     CHECK(call("kernel32.dll","openprocess",{0x1fffffu,0,0})==0&&g.last_error()==87);
-    // No MapViewOfFile route exists, so no address is a mapped view.
+    // UnmapViewOfFile accepts views mapped via NtMapViewOfSection and rejects non-view addresses with ERROR_INVALID_ADDRESS.
     CHECK(call("kernel32.dll","unmapviewoffile",{0x400000})==0&&g.last_error()==487);
     CHECK(call("kernel32.dll","unmapviewoffile",{0})==0&&g.last_error()==487);
+    const uint32_t sec_h=0x3440,sec_sz=0x3448,sec_base=0x3450,sec_vsz=0x3454;
+    mem.w32(sec_sz,0x1000);mem.w32(sec_sz+4,0);mem.w32(sec_base,0);mem.w32(sec_vsz,0);
+    CHECK(call("ntdll.dll","ntcreatesection",{sec_h,0,0,sec_sz,4,0,0})==0);
+    CHECK(call("ntdll.dll","ntmapviewofsection",{mem.r32(sec_h),0xffffffffu,sec_base,0,0,0,sec_vsz,2,0,4})==0&&mem.r32(sec_base)>=0x64000000u);
+    CHECK(call("kernel32.dll","unmapviewoffile",{mem.r32(sec_base)})==1&&g.last_error()==0);
+    CHECK(call("kernel32.dll","unmapviewoffile",{mem.r32(sec_base)+0x2000u})==0&&g.last_error()==487);
     // GetOverlappedResult over an OVERLAPPED {Internal, InternalHigh, Offset, OffsetHigh, hEvent}.
     const uint32_t ov=0x3420;
     for(uint32_t i=0;i<20;i+=4)mem.w32(ov+i,0);
@@ -60,6 +66,8 @@ int main() {
     CHECK(call("kernel32.dll","getoverlappedresult",{0x10,ov,nread,0})==1&&mem.r32(nread)==17&&g.last_error()==0);
     mem.w32(ov,0x103);
     CHECK(call("kernel32.dll","getoverlappedresult",{0x10,ov,nread,0})==0&&g.last_error()==996);
+    mem.w32(ov,0x80000005u);
+    CHECK(call("kernel32.dll","getoverlappedresult",{0x10,ov,nread,0})==0&&g.last_error()==234&&mem.r32(nread)==17);
     mem.w32(ov,0xC0000011u);
     CHECK(call("kernel32.dll","getoverlappedresult",{0x10,ov,nread,1})==0&&g.last_error()==38&&mem.r32(nread)==17);
     mem.w32(ov,0xC0000120u);
