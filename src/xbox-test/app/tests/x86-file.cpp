@@ -284,6 +284,10 @@ int main() {
     CHECK(kcall("getdiskfreespacew",{c_w,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&mem.r32(0x3c90)==8&&mem.r32(0x3c94)==512&&mem.r32(0x3c98)==100&&mem.r32(0x3c9c)==200);
     CHECK(kcall("getdiskfreespacew",{z_w,0x3c90,0,0,0})==0&&g.last_error()==21);
     CHECK(kcall("getdiskfreespacew",{0,0,0,0,0})==0&&g.last_error()==87);
+    CHECK(kcall("getdiskfreespacea",{c_a,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&mem.r32(0x3c90)==8&&mem.r32(0x3c94)==512&&mem.r32(0x3c98)==100&&mem.r32(0x3c9c)==200);
+    CHECK(kcall("getdiskfreespacea",{c_a,0,0,0,0x3c9c})==1&&mem.r32(0x3c9c)==200);   // NULL outputs are skipped
+    CHECK(kcall("getdiskfreespacea",{z_a,0x3c90,0,0,0})==0&&g.last_error()==21);
+    CHECK(kcall("getdiskfreespacea",{0,0,0,0,0})==0&&g.last_error()==87);
     CHECK(kcall("getdiskfreespaceexa",{c_a,0x3ca0,0x3ca8,0x3cb0})==1&&mem.r32(0x3ca0)==1000&&mem.r32(0x3ca4)==0&&mem.r32(0x3ca8)==2000&&mem.r32(0x3cb0)==3000);
     CHECK(kcall("getdiskfreespaceexw",{c_w,0x3ca0,0,0})==1&&mem.r32(0x3ca0)==1000);
     CHECK(kcall("getdiskfreespaceexa",{z_a,0x3ca0,0,0})==0&&g.last_error()==21);

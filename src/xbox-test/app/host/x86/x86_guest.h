@@ -18,6 +18,7 @@
 #include <functional>
 #include <map>
 #include <random>
+#include <set>
 #include <tuple>
 #include <string>
 #include <thread>
@@ -255,6 +256,8 @@ struct Guest {
     std::map<uint32_t, GdiDc> gdi_dcs;
     uint32_t gdi_serial=0;
     uint32_t file_serial = 0, find_serial = 0, sync_serial = 0, sync_handle_serial = 0;
+    static constexpr uint32_t process_id = 0x1000;     // GetCurrentProcessId; OpenProcess accepts only this id
+    std::set<uint32_t> process_handles; uint32_t process_handle_serial = 0;  // OpenProcess results, closable via CloseHandle
     std::map<uint32_t, bool> mm_timers;
     uint32_t mm_timer_serial = 0;
     // Guest DLLs loaded by the process (lowercase module name -> Dll) and the
@@ -1945,7 +1948,11 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetLastError", Conv::Stdcall, 0, [this](Cpu&) -> uint32_t { return last_error(); });
     reg.add("kernel32.dll", "SetLastError", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t { set_last_error(c.arg(0)); return 0; });
     reg.add("kernel32.dll", "GetCurrentProcess", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0xFFFFFFFFu; });
-    reg.add("kernel32.dll", "GetCurrentProcessId", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0x1000; });
+    reg.add("kernel32.dll", "GetCurrentProcessId", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return process_id; });
+    // Only this process exists in the guest: its id yields a closable handle, any other id is not a process (ERROR_INVALID_PARAMETER).
+    reg.add("kernel32.dll", "OpenProcess", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        if (c.arg(2) != process_id) { set_last_error(87); return 0; }
+        const uint32_t h = 0x78000000u + (++process_handle_serial); process_handles.insert(h); set_last_error(0); return h; });
     // Guest calls are serialized by the interpreter, so there are no buffered writes to flush.
     reg.add("kernel32.dll", "FlushProcessWriteBuffers", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0; });
     reg.add("kernel32.dll", "GetCurrentThread", Conv::Stdcall, 0, [](Cpu&) -> uint32_t { return 0xFFFFFFFEu; });
@@ -3262,6 +3269,7 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetConsoleMode", Conv::Stdcall, 2, no_console);
     reg.add("kernel32.dll", "SetConsoleMode", Conv::Stdcall, 2, no_console);
     reg.add("kernel32.dll", "ReadConsoleA", Conv::Stdcall, 5, no_console);
+    reg.add("kernel32.dll", "ReadConsoleW", Conv::Stdcall, 5, no_console);
     reg.add("kernel32.dll", "ReadConsoleInputA", Conv::Stdcall, 4, no_console);
     reg.add("kernel32.dll", "ReadConsoleInputW", Conv::Stdcall, 4, no_console);
     reg.add("kernel32.dll", "PeekConsoleInputA", Conv::Stdcall, 4, no_console);
@@ -3290,9 +3298,30 @@ inline void Guest::register_all() {
         set_last_error(5); return 0; });
     reg.add("kernel32.dll", "CreatePipe", Conv::Stdcall, 4, [this](Cpu&) -> uint32_t { set_last_error(50); return 0; });  // ERROR_NOT_SUPPORTED: no anonymous pipe route
     // The current-process pseudo handle (GetCurrentProcess) is still running; any other handle names no process here.
+    // The guest has no MapViewOfFile route and ReadFile/WriteFile refuse OVERLAPPED, so no view or I/O is ever started here.
+    // An address that is not a mapped view fails with ERROR_INVALID_ADDRESS, as on Windows.
+    reg.add("kernel32.dll", "UnmapViewOfFile", Conv::Stdcall, 1, [this](Cpu&) -> uint32_t { set_last_error(487); return 0; });
+    // OVERLAPPED is {Internal(NTSTATUS), InternalHigh(bytes), Offset.., hEvent}. A pending status is completed only by the
+    // guest itself, through the event it supplied; there is no host I/O to wait on, so an unsignaled wait faults like WaitForSingleObject.
+    reg.add("kernel32.dll", "GetOverlappedResult", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
+        const uint32_t ov=c.arg(1),out=c.arg(2);
+        if(!ov||!out){set_last_error(87);return 0;}
+        uint32_t status=mem.r32(ov);
+        if(status==0x103u){
+            if(!c.arg(3)){set_last_error(996);return 0;}  // ERROR_IO_INCOMPLETE
+            const uint32_t ev=mem.r32(ov+16);
+            if(!sync_handles.count(ev))throw Fault(FaultKind::Unsupported,c.eip,c.eip,"GetOverlappedResult: wait on a request that cannot complete");
+            if(sync_wait(c,ev,0xffffffffu)!=0){set_last_error(6);return 0;}
+            status=mem.r32(ov);
+        }
+        mem.w32(out,mem.r32(ov+4));
+        if(status==0x103u){set_last_error(996);return 0;}  // woken but the guest never completed the request
+        if(status<0x80000000u){set_last_error(0);return 1;}
+        set_last_error(status==0xC0000011u?38u:status==0xC0000120u?995u:status==0xC000014Bu?109u:317u);  // EOF, cancelled, broken pipe; else ERROR_MR_MID_NOT_FOUND
+        return 0; });
     reg.add("kernel32.dll", "GetExitCodeProcess", Conv::Stdcall, 2, [this](Cpu& c) -> uint32_t {
         if (!c.arg(1)) { set_last_error(87); return 0; }
-        if (c.arg(0) != 0xFFFFFFFFu) { set_last_error(6); return 0; }
+        if (c.arg(0) != 0xFFFFFFFFu && !process_handles.count(c.arg(0))) { set_last_error(6); return 0; }
         mem.w32(c.arg(1), 259u); set_last_error(0); return 1; });  // STILL_ACTIVE
     reg.add("kernel32.dll", "Beep", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 1; });  // no sound device: TRUE, no output
     reg.add("kernel32.dll", "SetErrorMode", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
@@ -3714,6 +3743,12 @@ inline void Guest::register_all() {
         if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}
         for(unsigned i=0;i<4;++i)if(c.arg(i+1))mem.w32(c.arg(i+1),q.args[i]);
         set_last_error(0);return 1; });
+    reg.add("kernel32.dll", "GetDiskFreeSpaceA", Conv::Stdcall, 5, [this,decode_ansi](Cpu& c) -> uint32_t {
+        if(!c.arg(0)){set_last_error(87);return 0;}
+        Host::FileCall q{Host::FileCall::Kind::DiskFreeW};q.path_w=decode_ansi(str(c.arg(0)));
+        if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}
+        for(unsigned i=0;i<4;++i)if(c.arg(i+1))mem.w32(c.arg(i+1),q.args[i]);
+        set_last_error(0);return 1; });
     for(bool wide:{false,true}){std::string name=wide?"GetDiskFreeSpaceExW":"GetDiskFreeSpaceExA";reg.add("kernel32.dll", name, Conv::Stdcall, 4, [this,wide](Cpu& c) -> uint32_t {
         if(!c.arg(0)){set_last_error(87);return 0;}
         Host::FileCall q{wide?Host::FileCall::Kind::DiskFreeExW:Host::FileCall::Kind::DiskFreeExA};if(wide)q.path_w=wstr(c.arg(0));else q.path_a=str(c.arg(0));
@@ -3875,6 +3910,7 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "CloseHandle", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
         auto it=file_handles.find(c.arg(0));if(it!=file_handles.end()){Host::FileCall q{Host::FileCall::Kind::Close};q.handle=it->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}file_handles.erase(it);return 1;}
         auto find=find_handles.find(c.arg(0));if(find!=find_handles.end()){Host::FileCall q{Host::FileCall::Kind::FindClose};q.handle=find->second;if(!call_file(q)){set_last_error(q.error?q.error:120);return 0;}find_handles.erase(find);return 1;}
+        if(process_handles.erase(c.arg(0)))return 1;
         close_sync(c.arg(0));return 1; });
     // Legacy OpenFile/LZOpenFileA resolve relative paths against cwd for OFSTRUCT/OF_REOPEN and decode once via CP_ACP so guard and host see the exact same wide path.
     auto open_legacy=[this,guard_file,decode_ansi](const char* op,uint32_t namep,uint32_t ofp,uint32_t style)->uint32_t{
