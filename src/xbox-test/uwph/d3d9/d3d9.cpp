@@ -1106,10 +1106,11 @@ inline unsigned renderStateScope(unsigned state) {
         return 0;
     }
 }
-// Only the coordinate-routing stage states are vertex state; the sampler's
-// displacement-map offset is the one vertex-side sampler state.
+// TEXCOORDINDEX and TEXTURETRANSFORMFLAGS belong to both pixel and vertex
+// state blocks; the sampler's displacement-map offset is the one vertex-side
+// sampler state.
 inline unsigned textureStageStateScope(unsigned type) {
-    return type==D3DTSS_TEXCOORDINDEX||type==D3DTSS_TEXTURETRANSFORMFLAGS?scopeVertex:scopePixel;
+    return type==D3DTSS_TEXCOORDINDEX||type==D3DTSS_TEXTURETRANSFORMFLAGS?scopePixel|scopeVertex:scopePixel;
 }
 inline unsigned samplerStateScope(unsigned type) {
     return type==D3DSAMP_DMAPOFFSET?scopeVertex:scopePixel;
@@ -1184,7 +1185,7 @@ struct StateBlock : d3dshim::Base, IDirect3DStateBlock9 {
         for(unsigned i=0;i<renderStateCount;++i)rsOwned[i]=all||(renderStateScope(i)&scope)!=0;
         for(unsigned s=0;s<textureStageCount;++s) {
             for(unsigned t=0;t<32;++t)tssOwned[s][t]=(textureStageStateScope(t)&scope)!=0;
-            textureOwned[s]=pixel;
+            textureOwned[s]=all;
         }
         for(unsigned s=0;s<samplerStateCount;++s)
             for(unsigned t=0;t<16;++t)samplerOwned[s][t]=(samplerStateScope(t)&scope)!=0;
@@ -1418,6 +1419,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     UINT STDMETHODCALLTYPE GetNumberOfSwapChains() override { return 1; }
     HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS* parameters) override {
         if(!parameters)return D3DERR_INVALIDCALL;
+        if(recording){recording->Release();recording=nullptr;}
         return rebuildSwapChain(parameters);
     }
     HRESULT STDMETHODCALLTYPE Present(const RECT* src,const RECT* dst,HWND override,const RGNDATA* dirty) override {
@@ -2895,13 +2897,13 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE SetVertexShaderConstantF(UINT start,const float* data,UINT count) override {
-        if(!data||start+count>maxVertexConst)return D3DERR_INVALIDCALL;
+        if(!data||start>maxVertexConst||count>maxVertexConst-start)return D3DERR_INVALIDCALL;
         if(recording){recording->recordConstants(true,start,data,count);return D3D_OK;}
         memcpy(vertexConstF[start],data,count*sizeof(float[4]));
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE GetVertexShaderConstantF(UINT start,float* data,UINT count) override {
-        if(!data||start+count>maxVertexConst)return D3DERR_INVALIDCALL;
+        if(!data||start>maxVertexConst||count>maxVertexConst-start)return D3DERR_INVALIDCALL;
         memcpy(data,vertexConstF[start],count*sizeof(float[4]));
         return D3D_OK;
     }
@@ -2982,13 +2984,13 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE SetPixelShaderConstantF(UINT start,const float* data,UINT count) override {
-        if(!data||start+count>maxPixelConst)return D3DERR_INVALIDCALL;
+        if(!data||start>maxPixelConst||count>maxPixelConst-start)return D3DERR_INVALIDCALL;
         if(recording){recording->recordConstants(false,start,data,count);return D3D_OK;}
         memcpy(pixelConstF[start],data,count*sizeof(float[4]));
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE GetPixelShaderConstantF(UINT start,float* data,UINT count) override {
-        if(!data||start+count>maxPixelConst)return D3DERR_INVALIDCALL;
+        if(!data||start>maxPixelConst||count>maxPixelConst-start)return D3DERR_INVALIDCALL;
         memcpy(data,pixelConstF[start],count*sizeof(float[4]));
         return D3D_OK;
     }

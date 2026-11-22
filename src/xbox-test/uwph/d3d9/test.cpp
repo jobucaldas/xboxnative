@@ -1426,8 +1426,6 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
                 CHECK_HR(device->SetSamplerState(0,D3DSAMP_ADDRESSU,w?D3DTADDRESS_CLAMP:D3DTADDRESS_MIRROR));
                 CHECK_HR(device->SetSamplerState(2,D3DSAMP_MAGFILTER,w?D3DTEXF_LINEAR:D3DTEXF_POINT));
                 CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,w?D3DTOP_SUBTRACT:D3DTOP_ADD));
-                CHECK_HR(device->SetTexture(0,w?texB:texA));
-                CHECK_HR(device->SetTexture(4,w?texA:nullptr));
                 CHECK_HR(device->SetPixelShader(w?psC1:psC0));
                 const float c3[4]={w?9.0f:1.0f,0,0,0},c200[4]={w?4.0f:3.0f,0,0,0};
                 CHECK_HR(device->SetPixelShaderConstantF(3,c3,1));
@@ -1441,8 +1439,6 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
                 CHECK(ss(0,D3DSAMP_ADDRESSU)==DWORD(w?D3DTADDRESS_CLAMP:D3DTADDRESS_MIRROR));
                 CHECK(ss(2,D3DSAMP_MAGFILTER)==DWORD(w?D3DTEXF_LINEAR:D3DTEXF_POINT));
                 CHECK(ts(0,D3DTSS_COLOROP)==DWORD(w?D3DTOP_SUBTRACT:D3DTOP_ADD));
-                CHECK(texOf(0)==(w?baseB:baseA));
-                CHECK(texOf(4)==(w?baseA:nullptr));
                 CHECK(psOf()==(w?psC1:psC0));
                 CHECK(psConst(3)==(w?9.0f:1.0f)&&psConst(200)==(w?4.0f:3.0f));
             };
@@ -1450,9 +1446,6 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
                 CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,w?D3DCULL_CCW:D3DCULL_CW));
                 CHECK_HR(device->SetRenderState(D3DRS_LIGHTING,w?TRUE:FALSE));
                 CHECK_HR(device->SetRenderState(D3DRS_AMBIENT,w?0xff808080:0xff112233));
-                CHECK_HR(device->SetTextureStageState(1,D3DTSS_TEXCOORDINDEX,w?3:2));
-                CHECK_HR(device->SetTextureStageState(1,D3DTSS_TEXTURETRANSFORMFLAGS,
-                    w?D3DTTFF_COUNT3:D3DTTFF_COUNT2));
                 CHECK_HR(device->SetVertexShader(w?vsOffset:vsPass));
                 const float c3[4]={w?8.0f:2.0f,0,0,0},c250[4]={w?6.0f:5.0f,0,0,0};
                 CHECK_HR(device->SetVertexShaderConstantF(3,c3,1));
@@ -1465,8 +1458,6 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
                 CHECK(rs(D3DRS_CULLMODE)==DWORD(w?D3DCULL_CCW:D3DCULL_CW));
                 CHECK(rs(D3DRS_LIGHTING)==DWORD(w?TRUE:FALSE));
                 CHECK(rs(D3DRS_AMBIENT)==(w?0xff808080u:0xff112233u));
-                CHECK(ts(1,D3DTSS_TEXCOORDINDEX)==(w?3u:2u));
-                CHECK(ts(1,D3DTSS_TEXTURETRANSFORMFLAGS)==DWORD(w?D3DTTFF_COUNT3:D3DTTFF_COUNT2));
                 CHECK(vsOf()==(w?vsOffset:vsPass));
                 CHECK(vsConst(3)==(w?8.0f:2.0f)&&vsConst(250)==(w?6.0f:5.0f));
                 CHECK(fvfOf()==(w?dwF1:dwF0)&&declOf()==(w?nullptr:declA));
@@ -1475,13 +1466,20 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
             auto setShared=[&](unsigned w){
                 CHECK_HR(device->SetRenderState(D3DRS_SHADEMODE,w?D3DSHADE_FLAT:D3DSHADE_GOURAUD));
                 CHECK_HR(device->SetRenderState(D3DRS_FOGCOLOR,w?0xff00ff00:0xffff0000));
+                CHECK_HR(device->SetTextureStageState(1,D3DTSS_TEXCOORDINDEX,w?3:2));
+                CHECK_HR(device->SetTextureStageState(1,D3DTSS_TEXTURETRANSFORMFLAGS,
+                    w?D3DTTFF_COUNT3:D3DTTFF_COUNT2));
             };
             auto checkShared=[&](unsigned w){
                 CHECK(rs(D3DRS_SHADEMODE)==DWORD(w?D3DSHADE_FLAT:D3DSHADE_GOURAUD));
                 CHECK(rs(D3DRS_FOGCOLOR)==(w?0xff00ff00u:0xffff0000u));
+                CHECK(ts(1,D3DTSS_TEXCOORDINDEX)==(w?3u:2u));
+                CHECK(ts(1,D3DTSS_TEXTURETRANSFORMFLAGS)==DWORD(w?D3DTTFF_COUNT3:D3DTTFF_COUNT2));
             };
-            // In neither half: only D3DSBT_ALL covers these.
+            // In neither half: only D3DSBT_ALL covers these (including bound textures).
             auto setOther=[&](unsigned w){
+                CHECK_HR(device->SetTexture(0,w?texB:texA));
+                CHECK_HR(device->SetTexture(4,w?texA:nullptr));
                 CHECK_HR(device->SetStreamSource(0,w?blue:red,w?4:0,stride));
                 CHECK_HR(device->SetIndices(w?ibB:ibA));
                 CHECK_HR(device->SetViewport(w?&vpB:&vpA));
@@ -1492,6 +1490,8 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
             };
             auto checkOther=[&](unsigned w){
                 UINT offset=0,strideBack=0;
+                CHECK(texOf(0)==(w?baseB:baseA));
+                CHECK(texOf(4)==(w?baseA:nullptr));
                 CHECK(streamOf(0,&offset,&strideBack)==(w?blue:red)&&offset==(w?4u:0u)&&strideBack==stride);
                 CHECK(indicesOf()==(w?ibB:ibA));
                 CHECK(sameViewport(viewportOf(),w?vpB:vpA)&&sameRect(scissorOf(),w?scissorB:scissorA));
@@ -1829,15 +1829,20 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
                     CHECK_HR(device->SetVertexDeclaration(nullptr));
                 }
             }
-            // Capture drops the reference to what it replaces, and a recording
-            // that is abandoned along with its block drops what it held.
+            // Capture drops the reference to what it replaces, D3DSBT_PIXELSTATE
+            // does not capture bound textures, and a recording that is abandoned
+            // along with its block drops what it held.
             {
                 IDirect3DTexture9* swapped=nullptr;
                 CHECK_HR(device->CreateTexture(2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&swapped,nullptr));
                 if(swapped) {
                     CHECK_HR(device->SetTexture(7,swapped));
+                    IDirect3DStateBlock9* pixelNoTex=nullptr;
+                    CHECK_HR(device->CreateStateBlock(D3DSBT_PIXELSTATE,&pixelNoTex));
+                    CHECK(refsOf(swapped)==2);   // guest and device only; pixel block does not hold textures
+                    if(pixelNoTex)pixelNoTex->Release();
                     IDirect3DStateBlock9* holder=nullptr;
-                    CHECK_HR(device->CreateStateBlock(D3DSBT_PIXELSTATE,&holder));
+                    CHECK_HR(device->CreateStateBlock(D3DSBT_ALL,&holder));
                     CHECK(refsOf(swapped)==3);   // guest, device, block
                     CHECK_HR(device->SetTexture(7,nullptr));
                     if(holder) {
@@ -1848,11 +1853,17 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
                     CHECK_HR(device->BeginStateBlock());
                     CHECK_HR(device->SetTexture(7,swapped));
                     CHECK(refsOf(swapped)==2);   // the recording holds it
+                    // Integer wrap-around on constant register range must be rejected (recording and live).
+                    const float dummy[4]={1,2,3,4};
+                    CHECK_HR_IS(device->SetVertexShaderConstantF(0xffffffffu,dummy,2),D3DERR_INVALIDCALL);
+                    CHECK_HR_IS(device->SetPixelShaderConstantF(0xffffffffu,dummy,2),D3DERR_INVALIDCALL);
                     IDirect3DStateBlock9* made=nullptr;
                     CHECK_HR(device->EndStateBlock(&made));
                     CHECK(refsOf(swapped)==2);
                     if(made)made->Release();
                     CHECK(refsOf(swapped)==1);
+                    CHECK_HR_IS(device->SetVertexShaderConstantF(0xffffffffu,dummy,2),D3DERR_INVALIDCALL);
+                    CHECK_HR_IS(device->SetPixelShaderConstantF(0xffffffffu,dummy,2),D3DERR_INVALIDCALL);
                     swapped->Release();
                 }
             }
@@ -1887,13 +1898,19 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
     }
 
     // A query outlives a Reset: it holds the device and its context, which Reset
-    // keeps.
+    // keeps. An open state-block recording is dropped by Reset.
     IDirect3DQuery9* survivor=nullptr;
     CHECK_HR(device->CreateQuery(D3DQUERYTYPE_EVENT,&survivor));
     CHECK(refsOf(device)==deviceRefs+1);
+    CHECK_HR(device->BeginStateBlock());
 
     // Reset rebuilds the swap chain, as D3D9 documents.
     CHECK_HR(device->Reset(&present));
+    {
+        IDirect3DStateBlock9* afterResetBlock=nullptr;
+        CHECK_HR_IS(device->EndStateBlock(&afterResetBlock),D3DERR_INVALIDCALL);
+        CHECK(afterResetBlock==nullptr);
+    }
     if(survivor) {
         BOOL signalled=FALSE;
         CHECK_HR(survivor->Issue(D3DISSUE_END));
