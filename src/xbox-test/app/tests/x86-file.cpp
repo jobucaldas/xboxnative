@@ -297,8 +297,8 @@ int main() {
     CHECK(kcall("getdiskfreespacew",{0,0,0,0,0})==0&&g.last_error()==21&&last_df_w==u"Z:\\");  // NULL on a failing volume reports that volume's error
     mock_cwd_w=saved_cwd_w;
     CHECK(kcall("getdiskfreespacew",{empty_w,0,0,0,0})==0&&g.last_error()==3&&last_df_w.empty());
-    CHECK(kcall("getdiskfreespacea",{c_a,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&mem.r32(0x3c90)==8&&mem.r32(0x3c94)==512&&mem.r32(0x3c98)==100&&mem.r32(0x3c9c)==200);
-    CHECK(kcall("getdiskfreespacea",{c_a,0,0,0,0x3c9c})==1&&mem.r32(0x3c9c)==200);   // NULL outputs are skipped
+    CHECK(kcall("getdiskfreespacea",{c_a,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&last_df_w==u"C:\\"&&mem.r32(0x3c90)==8&&mem.r32(0x3c94)==512&&mem.r32(0x3c98)==100&&mem.r32(0x3c9c)==200);
+    CHECK(kcall("getdiskfreespacea",{c_a,0,0,0,0x3c9c})==1&&last_df_w==u"C:\\"&&mem.r32(0x3c9c)==200);   // NULL outputs are skipped
     CHECK(kcall("getdiskfreespacea",{z_a,0x3c90,0,0,0})==0&&g.last_error()==21);
     mock_cwd_w=u"C:\\dir";last_df_w=u"?";
     CHECK(kcall("getdiskfreespacea",{0,0x3c90,0x3c94,0x3c98,0x3c9c})==1&&last_df_w==u"C:\\"&&mem.r32(0x3c90)==8&&mem.r32(0x3c9c)==200);

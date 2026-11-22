@@ -74,7 +74,7 @@ int main() {
     try{call("kernel32.dll","waitforsingleobject",{proc,0xffffffffu});}catch(const Fault&){infinite_faulted=true;}
     CHECK(infinite_faulted);
     mem.w32(list,0xffffffffu);mem.w32(list+4,proc);
-    CHECK(call("kernel32.dll","waitformultipleobjects",{2,list,0,0})==258&&call("kernel32.dll","waitformultipleobjects",{2,list,1,0})==258);
+    CHECK(call("kernel32.dll","waitformultipleobjects",{2,list,0,0})==258&&call("kernel32.dll","waitformultipleobjects",{2,list,1,0})==0xffffffffu&&g.last_error()==87);
     CHECK(call("kernel32.dll","waitformultipleobjects",{1,list,1,0})==258);
     mem.w32(list+4,0xffffffffu);
     CHECK(call("kernel32.dll","waitformultipleobjects",{2,list,1,0})==0xffffffffu&&g.last_error()==87);

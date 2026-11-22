@@ -521,7 +521,7 @@ struct Guest {
             for(uint32_t i=0;i<count;++i){
                 for(uint32_t j=i+1;j<count;++j){
                     if(entries[i].is_thread&&entries[j].is_thread&&entries[i].handle==entries[j].handle){set_last_error(87);return 0xffffffffu;}
-                    if(entries[i].is_process&&entries[j].is_process&&entries[i].handle==entries[j].handle){set_last_error(87);return 0xffffffffu;}
+                    if(entries[i].is_process&&entries[j].is_process){set_last_error(87);return 0xffffffffu;}
                     if(!entries[i].is_thread&&!entries[j].is_thread&&!entries[i].is_process&&!entries[j].is_process&&entries[i].object_id==entries[j].object_id){set_last_error(87);return 0xffffffffu;}
                 }
             }
