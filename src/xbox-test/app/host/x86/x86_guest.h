@@ -50,6 +50,27 @@ inline void set_staged_module_path(std::string module,const std::string& path) {
     if(path.empty())staged_module_paths().erase(module);else staged_module_paths()[module]=path;
 }
 inline void clear_staged_module_paths() { staged_module_paths().clear(); }
+// UTF-8 -> UTF-16 code units (supplementary planes become surrogate pairs).
+// Malformed, overlong, surrogate or out-of-range sequences give U+FFFD per bad lead byte.
+inline std::u16string utf8_to_utf16(const std::string& s) {
+    std::u16string out;
+    for(size_t i=0;i<s.size();){
+        uint8_t b=uint8_t(s[i]);
+        uint32_t cp=0xFFFDu; size_t len=1;
+        if(b<0x80){cp=b;}
+        else if(b>=0xC2&&b<=0xF4){
+            size_t need=b>=0xF0?3:b>=0xE0?2:1;
+            uint32_t v=b&(0x3Fu>>need); bool ok=i+need<s.size();
+            for(size_t k=1;ok&&k<=need;++k){uint8_t t=uint8_t(s[i+k]);if((t&0xC0)!=0x80)ok=false;else v=(v<<6)|(t&0x3Fu);}
+            static const uint32_t min_cp[]={0,0x80,0x800,0x10000};
+            if(ok&&v>=min_cp[need]&&v<=0x10FFFFu&&!(v>=0xD800&&v<=0xDFFF)){cp=v;len=need+1;}
+        }
+        i+=len;
+        if(cp>=0x10000){cp-=0x10000;out.push_back(char16_t(0xD800+(cp>>10)));out.push_back(char16_t(0xDC00+(cp&0x3FF)));}
+        else out.push_back(char16_t(cp));
+    }
+    return out;
+}
 
 // ---- guest heap: first-fit free list over a lazily mapped guest arena ----
 struct GuestHeap {
@@ -147,7 +168,8 @@ struct Guest {
     uint32_t iob_addr = 0x7FFD0000;
     uint32_t initenv = 0, commode = 0, fmode = 0, mb_cur_max = 0, errno_ptr = 0;
     uint32_t startupinfo = 0, cmdline_ptr = 0, env_ptr = 0, env_w_ptr = 0, module_name_ptr = 0;
-    uint32_t image_base = 0;
+    uint32_t image_base = 0, image_size = 0;  // image_size 0 = unknown: FROM_ADDRESS falls back to a 16 MiB window
+    bool in_exe_image(uint32_t p) const { return p >= image_base && p - image_base < (image_size ? image_size : 0x1000000u); }
     std::map<std::string, std::string> guest_environment;
     std::map<std::string, std::string> guest_environment_names;
     struct ResourceRef { uint32_t module=0, data=0, size=0; };
@@ -2030,17 +2052,24 @@ inline void Guest::register_all() {
         return exe_path;
     };
     reg.add("kernel32.dll", "GetModuleFileNameA", Conv::Stdcall, 3, [this,module_file_name](Cpu& c) -> uint32_t {
-        uint32_t buf = c.arg(1), n = c.arg(2); if (!buf || !n) return 0;
+        uint32_t buf = c.arg(1), n = c.arg(2); if (!buf) return 0;
+        if (!n) { set_last_error(122); return 0; }  // ERROR_INSUFFICIENT_BUFFER
         const std::string& file = module_file_name(c.arg(0));
-        uint32_t put = uint32_t(file.size()) < n ? uint32_t(file.size()) : n - 1;
-        mem.write_bytes(buf, file.data(), put); mem.w8(buf + put, 0); return put; });
+        bool fits = uint32_t(file.size()) < n;
+        uint32_t put = fits ? uint32_t(file.size()) : n - 1;
+        mem.write_bytes(buf, file.data(), put); mem.w8(buf + put, 0);
+        set_last_error(fits ? 0 : 122);
+        return fits ? put : n; });  // truncated: n, with the buffer terminated
     reg.add("kernel32.dll", "GetModuleFileNameW", Conv::Stdcall, 3, [this,module_file_name](Cpu& c) -> uint32_t {
-        uint32_t buf = c.arg(1), n = c.arg(2); if (!buf || !n) return 0;
-        const std::string& file = module_file_name(c.arg(0));
-        std::u16string w(file.begin(), file.end());
-        uint32_t put = uint32_t(w.size()) < n ? uint32_t(w.size()) : n - 1;
+        uint32_t buf = c.arg(1), n = c.arg(2); if (!buf) return 0;
+        if (!n) { set_last_error(122); return 0; }  // ERROR_INSUFFICIENT_BUFFER
+        std::u16string w = utf8_to_utf16(module_file_name(c.arg(0)));
+        bool fits = uint32_t(w.size()) < n;
+        uint32_t put = fits ? uint32_t(w.size()) : n - 1;
         for (uint32_t i = 0; i < put; ++i) { mem.w8(buf + i * 2, uint8_t(w[i])); mem.w8(buf + i * 2 + 1, uint8_t(w[i] >> 8)); }
-        mem.w8(buf + put * 2, 0); mem.w8(buf + put * 2 + 1, 0); return put; });
+        mem.w8(buf + put * 2, 0); mem.w8(buf + put * 2 + 1, 0);
+        set_last_error(fits ? 0 : 122);
+        return fits ? put : n; });
     reg.add("kernel32.dll", "GetFullPathNameW", Conv::Stdcall, 4, [this](Cpu& c) -> uint32_t {
 #if defined(_WIN32)
         using Fn = DWORD (WINAPI*)(LPCWSTR, DWORD, LPWSTR, LPWSTR*);
@@ -2295,7 +2324,7 @@ inline void Guest::register_all() {
         uint32_t flags = c.arg(0), p = c.arg(1), out = c.arg(2);
         uint32_t base = 0;
         if (flags & 4) {  // FROM_ADDRESS: find the module containing the address
-            if (p >= image_base && p < image_base + 0x1000000u) base = image_base;
+            if (in_exe_image(p)) base = image_base;
             else for (auto& kv : dlls) {
                 if (p >= kv.second.image.base && p < kv.second.image.base + kv.second.image.size) { base = kv.second.image.base; break; }
             }
@@ -2314,7 +2343,7 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "GetModuleHandleExA", Conv::Stdcall, 3, [this,pin_module](Cpu& c) -> uint32_t {
         uint32_t flags=c.arg(0), p=c.arg(1), out=c.arg(2), base=0;
         if(flags&4){
-            if(p>=image_base&&p<image_base+0x1000000u)base=image_base;
+            if(in_exe_image(p))base=image_base;
             else for(const auto& kv:dlls)if(p>=kv.second.image.base&&p<kv.second.image.base+kv.second.image.size){base=kv.second.image.base;break;}
         }else if(!p)base=image_base;
         else base=module_by_name(str(p),c.thunks);

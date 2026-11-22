@@ -475,7 +475,7 @@ inline PlayResult run_image(const std::vector<uint8_t>& file, const std::string&
         r.imports = img.imports; r.bound = img.bound; r.relocations = img.relocations; r.unresolved = img.unresolved;
         for(const auto& module:guest.dlls) for(const auto& item:module.second.image.gap_imports) r.gap_imports.push_back(item);
         if(on_imports) on_imports(r);
-        guest.image_base = img.base;
+        guest.image_base = img.base; guest.image_size = img.size;
         guest.exe_tls = img.tls;  // each thread's TLS block comes from the exe's directory
         guest.add_module(name, img.base);
         map_thunk_page(mem, table);
