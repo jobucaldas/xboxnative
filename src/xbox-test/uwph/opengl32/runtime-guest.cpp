@@ -11,7 +11,7 @@ extern "C" DWORD WINAPI gl_entry() {
     auto getProc=reinterpret_cast<Proc>(GetProcAddress(module,"wglGetProcAddress"));
     auto create=reinterpret_cast<Create>(GetProcAddress(module,"wglCreateContext"));
     auto current=reinterpret_cast<Current>(GetProcAddress(module,"wglGetCurrentContext"));
-    if(!getProc || !create || !current || !GetProcAddress(module,"wglDeleteContext") || !GetProcAddress(module,"wglMakeCurrent"))return 3;
+    if(!getProc || !create || !current || !GetProcAddress(module,"wglDeleteContext") || !GetProcAddress(module,"wglMakeCurrent") || !GetProcAddress(module,"wglShareLists"))return 3;
     // No driver: no context, no extension entry points, and no host DC reaches GL.
     if(current()!=nullptr || getProc("glGetString")!=nullptr)return 4;
     SetLastError(0);

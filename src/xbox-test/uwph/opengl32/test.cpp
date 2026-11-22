@@ -42,6 +42,10 @@ static DWORD WINAPI check_thread(void*) {
     auto reference_remove = reinterpret_cast<Delete>(GetProcAddress(module, "wglDeleteContext"));
     auto reference_make = reinterpret_cast<Make>(GetProcAddress(module, "wglMakeCurrent"));
     CHECK(remove && make && reference_remove && reference_make);
+    using Share = BOOL (WINAPI*)(HGLRC, HGLRC);
+    auto share = reinterpret_cast<Share>(opengl32_core::resolve("opengl32.dll", "wglShareLists"));
+    auto reference_share = reinterpret_cast<Share>(GetProcAddress(module, "wglShareLists"));
+    CHECK(share && reference_share);
     const uintptr_t handles[] = {0, 1, 0x12345678, UINTPTR_MAX};
     for (auto handle : handles) {
         auto invalid_dc = reinterpret_cast<HDC>(handle);
@@ -66,6 +70,17 @@ static DWORD WINAPI check_thread(void*) {
             CHECK(error == (expected ? 0xdead : ERROR_INVALID_HANDLE));
             SetLastError(0xdead);
             CHECK(make(hdc, rc) == expected && GetLastError() == error);
+            CHECK(!context() && !dc());
+        }
+        // No context handles exist, so sharing between any pair fails like Wine's.
+        for (auto value : handles) {
+            auto other = reinterpret_cast<HGLRC>(value);
+            SetLastError(0xdead);
+            expected = reference_share(rc, other);
+            error = GetLastError();
+            CHECK(!expected);
+            SetLastError(0xdead);
+            CHECK(share(rc, other) == expected && GetLastError() == error);
             CHECK(!context() && !dc());
         }
     }

@@ -26,6 +26,11 @@ inline BOOL WINAPI delete_context(HGLRC) {
     SetLastError(ERROR_INVALID_HANDLE);
     return FALSE;
 }
+// No context handles exist, so there is nothing to share between.
+inline BOOL WINAPI share_lists(HGLRC, HGLRC) {
+    SetLastError(ERROR_INVALID_HANDLE);
+    return FALSE;
+}
 inline BOOL WINAPI make_current(HDC dc, HGLRC context) {
     // With no previous context, Wine accepts a non-null DC and null context
     // without inspecting the DC. This does not create or bind a context.
@@ -41,6 +46,7 @@ inline uintptr_t resolve(const char* dll, const char* name) {
     if (!strcmp(name, "wglCreateContext")) return reinterpret_cast<uintptr_t>(&create_context);
     if (!strcmp(name, "wglDeleteContext")) return reinterpret_cast<uintptr_t>(&delete_context);
     if (!strcmp(name, "wglMakeCurrent")) return reinterpret_cast<uintptr_t>(&make_current);
+    if (!strcmp(name, "wglShareLists")) return reinterpret_cast<uintptr_t>(&share_lists);
     return 0;
 }
 }
