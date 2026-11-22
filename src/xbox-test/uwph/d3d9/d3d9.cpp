@@ -161,6 +161,7 @@ void fillCaps(D3DCAPS9* caps,D3DDEVTYPE type,UINT adapter) {
     caps->Caps=D3DCAPS_READ_SCANLINE;
     caps->PresentationIntervals=D3DPRESENT_INTERVAL_IMMEDIATE|D3DPRESENT_INTERVAL_ONE;
     caps->DevCaps=D3DDEVCAPS_DRAWPRIMTLVERTEX|D3DDEVCAPS_HWTRANSFORMANDLIGHT;
+    caps->TextureCaps=D3DPTEXTURECAPS_CUBEMAP|D3DPTEXTURECAPS_MIPCUBEMAP;
     caps->MaxTextureWidth=caps->MaxTextureHeight=16384;
     caps->MaxVolumeExtent=2048;
     caps->MaxTextureRepeat=8192;
@@ -437,16 +438,17 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
     ID3D11RenderTargetView* rtv=nullptr;     // when the surface is a render target
     ID3D11DepthStencilView* dsv=nullptr;     // when the surface is depth-stencil
     D3DSURFACE_DESC desc{};
-    // The mip level this surface is, for the texture's own levels; the back
-    // buffer and standalone surfaces are level 0.
-    UINT level=0;
+    // The D3D11 subresource this surface is: the mip level for a 2D texture's
+    // own levels, face*levels+level for a cube face; the back buffer and
+    // standalone surfaces are subresource 0.
+    UINT subresource=0;
     bool cpuVisible=false;                   // SYSTEMMEM, SCRATCH or DYNAMIC
     // A level of a MANAGED texture locks through the texture's staging shadow
     // (the GPU texture itself has no CPU access); null for other surfaces.
     // Both references are owned: the shadow keeps the staging copy alive, the
     // container keeps the texture wrapper alive, as a D3D9 level surface does.
     ID3D11Texture2D* shadow=nullptr;
-    IDirect3DTexture9* container=nullptr;   // the texture wrapper this level is of, AddRef'd
+    IDirect3DBaseTexture9* container=nullptr;   // the texture wrapper this level is of, AddRef'd
     // The resource an outstanding lock mapped: the shadow for a MANAGED level,
     // the texture itself otherwise. The unlock and the destructor unmap it.
     ID3D11Texture2D* mappedRes=nullptr;
@@ -457,9 +459,9 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
     // then copy a written shadow level up to the texture the sampler reads.
     void finishLock() {
         if(!locked)return;
-        if(context&&mappedRes)context->Unmap(mappedRes,level);
+        if(context&&mappedRes)context->Unmap(mappedRes,subresource);
         if(context&&shadow&&texture&&!(lockedFlags&D3DLOCK_READONLY))
-            context->CopySubresourceRegion(texture,level,0,0,0,shadow,level,nullptr);
+            context->CopySubresourceRegion(texture,subresource,0,0,0,shadow,subresource,nullptr);
         locked=false;
     }
     // D3D9's surfaces and swap chains hold their device weakly: the device owns
@@ -525,7 +527,7 @@ struct Surface : d3dshim::Base, IDirect3DSurface9 {
         // SYSTEMMEM texture.
         mappedRes=shadow?shadow:texture;
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        HRESULT hr=context->Map(mappedRes,level,
+        HRESULT hr=context->Map(mappedRes,subresource,
             shadow?textureMapMode(true,flags):textureMapMode(stagingPool(desc.Pool),flags),0,&mapped);
         if(FAILED(hr)){mappedRes=nullptr;return D3DERR_INVALIDCALL;}
         locked=true;
@@ -743,7 +745,7 @@ struct Texture : Resource<IDirect3DTexture9> {
         surface->shadow=shadow;
         surface->container=this;
         surface->container->AddRef();
-        surface->level=level;
+        surface->subresource=level;
         GetLevelDesc(level,&surface->desc);
         // A level of a texture that can be rendered to answers a render target
         // view, which is what SetRenderTarget needs from it.
@@ -798,6 +800,139 @@ struct Texture : Resource<IDirect3DTexture9> {
     UINT lockedLevel=0;
     bool lockedReadOnly=false;
 };
+
+// A cube texture is one 6-slice D3D11 texture; face f, level l is subresource
+// f*levels+l. Like Texture it keeps a staging shadow when the GPU texture has no
+// CPU access (MANAGED, or DYNAMIC, which D3D11 cannot spell on an array).
+struct CubeTexture : Resource<IDirect3DCubeTexture9> {
+    CubeTexture() { self=static_cast<IDirect3DCubeTexture9*>(this);
+        D3DSHIM_IDS(&__uuidof(IDirect3DCubeTexture9),&__uuidof(IDirect3DBaseTexture9),
+                    &__uuidof(IDirect3DResource9)); }
+    D3DSHIM_REF
+    D3DSHIM_QI
+    static constexpr UINT faces=6;
+    static constexpr UINT maxSubresources=faces*16;
+    ID3D11Texture2D* texture=nullptr;   // also `inner`
+    ID3D11Texture2D* shadow=nullptr;
+    ID3D11ShaderResourceView* view=nullptr;
+    UINT levels=1;
+    D3DFORMAT format=D3DFMT_UNKNOWN;
+    DWORD usage=0;
+    D3DPOOL pool=D3DPOOL_DEFAULT;
+    UINT edge=0;
+    DWORD lod=0;
+    D3DTEXTUREFILTERTYPE autoGen=D3DTEXF_LINEAR;
+    // One lock per (face, level), as D3D9 allows several at once.
+    bool lockedSub[maxSubresources]{};
+    bool readOnlySub[maxSubresources]{};
+    ~CubeTexture() {
+        if(view)view->Release();
+        if(shadow)shadow->Release();
+    }
+    D3DRESOURCETYPE STDMETHODCALLTYPE GetType() override { return D3DRTYPE_CUBETEXTURE; }
+    DWORD STDMETHODCALLTYPE SetLOD(DWORD value) override { DWORD old=lod;lod=value;return old; }
+    DWORD STDMETHODCALLTYPE GetLOD() override { return lod; }
+    DWORD STDMETHODCALLTYPE GetLevelCount() override { return levels; }
+    HRESULT STDMETHODCALLTYPE SetAutoGenFilterType(D3DTEXTUREFILTERTYPE type) override {
+        autoGen=type;return D3D_OK;
+    }
+    D3DTEXTUREFILTERTYPE STDMETHODCALLTYPE GetAutoGenFilterType() override { return autoGen; }
+    void STDMETHODCALLTYPE GenerateMipSubLevels() override {}
+    HRESULT STDMETHODCALLTYPE GetLevelDesc(UINT level,D3DSURFACE_DESC* out) override {
+        if(!out||level>=levels)return D3DERR_INVALIDCALL;
+        *out=D3DSURFACE_DESC{};
+        out->Format=format;
+        out->Type=D3DRTYPE_SURFACE;
+        out->Usage=usage;
+        out->Pool=pool;
+        out->MultiSampleType=D3DMULTISAMPLE_NONE;
+        out->Width=edge>>level?edge>>level:1;
+        out->Height=out->Width;
+        return D3D_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetCubeMapSurface(D3DCUBEMAP_FACES face,UINT level,
+                                                IDirect3DSurface9** out) override {
+        if(!out)return D3DERR_INVALIDCALL;
+        *out=nullptr;
+        if(!texture||UINT(face)>=faces||level>=levels)return D3DERR_INVALIDCALL;
+        auto surface=d3dshim::create<Surface>();
+        if(!surface)return E_OUTOFMEMORY;
+        // Owned references, as for Texture::GetSurfaceLevel: the face outlives
+        // the cube wrapper, and the shadow stays alive with it.
+        texture->AddRef();
+        surface->texture=texture;
+        surface->inner=texture;
+        surface->device=device;
+        surface->context=context;
+        surface->cpuVisible=cpuVisible;
+        if(shadow)shadow->AddRef();
+        surface->shadow=shadow;
+        surface->container=this;
+        surface->container->AddRef();
+        surface->subresource=UINT(face)*levels+level;
+        GetLevelDesc(level,&surface->desc);
+        if(usage&D3DUSAGE_RENDERTARGET) {
+            // The texture has six slices, so D3D11 only takes an array view of
+            // the one face (a TEXTURE2D view of it is refused).
+            D3D11_RENDER_TARGET_VIEW_DESC rtv{};
+            rtv.Format=dxgiFormat(format);
+            rtv.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+            rtv.Texture2DArray.MipSlice=level;
+            rtv.Texture2DArray.FirstArraySlice=UINT(face);
+            rtv.Texture2DArray.ArraySize=1;
+            if(FAILED(device11->CreateRenderTargetView(texture,&rtv,&surface->rtv))) {
+                d3dshim::destroy(surface);   // ~Surface drops texture, shadow, container
+                return D3DERR_INVALIDCALL;
+            }
+        }
+        *out=surface;
+        return D3D_OK;
+    }
+    HRESULT STDMETHODCALLTYPE LockRect(D3DCUBEMAP_FACES face,UINT level,D3DLOCKED_RECT* out,
+                                       const RECT*,DWORD flags) override {
+        if(!out)return D3DERR_INVALIDCALL;
+        out->pBits=nullptr;out->Pitch=0;
+        if(!texture||!context||UINT(face)>=faces||level>=levels||levels*faces>maxSubresources)
+            return D3DERR_INVALIDCALL;
+        if(!cpuVisible) {
+            d3dshim::noteOnce("D3D9 shim: LockRect on a default-pool cube texture refused, as on Windows");
+            return D3DERR_INVALIDCALL;
+        }
+        const UINT sub=UINT(face)*levels+level;
+        if(lockedSub[sub])return D3DERR_INVALIDCALL;
+        ID3D11Texture2D* target=shadow?shadow:texture;
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        HRESULT hr=context->Map(target,sub,
+            shadow?textureMapMode(true,flags):textureMapMode(stagingPool(pool),flags),0,&mapped);
+        if(FAILED(hr))return D3DERR_INVALIDCALL;
+        lockedSub[sub]=true;
+        readOnlySub[sub]=(flags&D3DLOCK_READONLY)!=0;
+        out->pBits=mapped.pData;
+        out->Pitch=INT(mapped.RowPitch);
+        return D3D_OK;
+    }
+    HRESULT STDMETHODCALLTYPE UnlockRect(D3DCUBEMAP_FACES face,UINT level) override {
+        if(UINT(face)>=faces||level>=levels||levels*faces>maxSubresources)return D3DERR_INVALIDCALL;
+        const UINT sub=UINT(face)*levels+level;
+        if(!lockedSub[sub])return D3DERR_INVALIDCALL;
+        ID3D11Texture2D* target=shadow?shadow:texture;
+        context->Unmap(target,sub);
+        if(shadow&&!readOnlySub[sub])
+            context->CopySubresourceRegion(texture,sub,0,0,0,shadow,sub,nullptr);
+        lockedSub[sub]=false;
+        return D3D_OK;
+    }
+    HRESULT STDMETHODCALLTYPE AddDirtyRect(D3DCUBEMAP_FACES face,const RECT*) override {
+        return UINT(face)<faces?D3D_OK:D3DERR_INVALIDCALL;
+    }
+};
+
+// The view a sampler stage binds for any texture type the shim hands out.
+ID3D11ShaderResourceView* viewOfTexture(IDirect3DBaseTexture9* base) {
+    if(!base)return nullptr;
+    return base->GetType()==D3DRTYPE_CUBETEXTURE
+        ?static_cast<CubeTexture*>(base)->view:static_cast<Texture*>(base)->view;
+}
 }
 
 namespace {
@@ -1419,7 +1554,6 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     UINT STDMETHODCALLTYPE GetNumberOfSwapChains() override { return 1; }
     HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS* parameters) override {
         if(!parameters)return D3DERR_INVALIDCALL;
-        if(recording){recording->Release();recording=nullptr;}
         return rebuildSwapChain(parameters);
     }
     HRESULT STDMETHODCALLTYPE Present(const RECT* src,const RECT* dst,HWND override,const RGNDATA* dirty) override {
@@ -1444,7 +1578,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
 
     // -------------------------------------------------------------- resources
     HRESULT createTexture2D(UINT width,UINT height,UINT levels,DWORD usage,D3DFORMAT format,
-                            D3DPOOL pool,ID3D11Texture2D** out) {
+                            D3DPOOL pool,ID3D11Texture2D** out,bool cube=false) {
         if(!out)return D3DERR_INVALIDCALL;
         *out=nullptr;
         DXGI_FORMAT dxgi=dxgiFormat(format);
@@ -1456,18 +1590,28 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         desc.Width=width;desc.Height=height;
         // D3D9's Levels=0 asks for the full chain down to 1x1.
         desc.MipLevels=levels?levels:mipChain(width,height);
-        desc.ArraySize=1;
+        desc.ArraySize=cube?6:1;
         desc.Format=dxgi;desc.SampleDesc.Count=1;
         desc.Usage=usageFor(pool,usage);
         desc.BindFlags=0;
         if(usage&D3DUSAGE_RENDERTARGET)desc.BindFlags|=D3D11_BIND_RENDER_TARGET;
         if(usage&D3DUSAGE_DEPTHSTENCIL)desc.BindFlags|=D3D11_BIND_DEPTH_STENCIL;
+        // A cube map drawn into is the usual environment map, so it is sampled.
+        if(cube&&(usage&D3DUSAGE_RENDERTARGET)&&!(usage&D3DUSAGE_DEPTHSTENCIL))
+            desc.BindFlags|=D3D11_BIND_SHADER_RESOURCE;
         if(!desc.BindFlags&&desc.Usage==D3D11_USAGE_DEFAULT)desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
         desc.CPUAccessFlags=cpuAccessFor(pool,usage);
         // D3D11 refuses a dynamic resource with no bind flag and a staging
         // resource with one, so the two pools get exactly what they allow.
         if(desc.Usage==D3D11_USAGE_DYNAMIC&&!desc.BindFlags)desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
         if(desc.Usage==D3D11_USAGE_STAGING)desc.BindFlags=0;
+        if(cube) {
+            // A dynamic texture is one subresource in D3D11, so a dynamic cube
+            // is default with a staging shadow, like MANAGED. Only the GPU
+            // texture is a cube: a staging texture cannot be one.
+            if(desc.Usage==D3D11_USAGE_DYNAMIC){desc.Usage=D3D11_USAGE_DEFAULT;desc.CPUAccessFlags=0;}
+            if(desc.Usage!=D3D11_USAGE_STAGING)desc.MiscFlags=D3D11_RESOURCE_MISC_TEXTURECUBE;
+        }
         // A MANAGED texture is CPU-writable and sampled. Use DEFAULT + shader
         // resource with a staging shadow for LockRect; this is also the safe
         // spelling for a managed texture on the console's D3D11-on-12 path.
@@ -1543,11 +1687,64 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         d3dshim::noteOnce("D3D9 shim: volume textures are not implemented");
         return D3DERR_INVALIDCALL;
     }
-    HRESULT STDMETHODCALLTYPE CreateCubeTexture(UINT,UINT,DWORD,D3DFORMAT,D3DPOOL,
-                                                IDirect3DCubeTexture9** out,HANDLE*) override {
-        if(out)*out=nullptr;
-        d3dshim::noteOnce("D3D9 shim: cube textures are not implemented");
-        return D3DERR_INVALIDCALL;
+    HRESULT STDMETHODCALLTYPE CreateCubeTexture(UINT edgeLength,UINT levels,DWORD usage,D3DFORMAT format,
+                                                D3DPOOL pool,IDirect3DCubeTexture9** out,HANDLE*) override {
+        if(!out)return D3DERR_INVALIDCALL;
+        *out=nullptr;
+        if(!edgeLength||UINT(pool)>UINT(D3DPOOL_SCRATCH))return D3DERR_INVALIDCALL;
+        if(levels>mipChain(edgeLength,edgeLength))return D3DERR_INVALIDCALL;
+        // D3D9's own rules: a render target or depth surface lives in DEFAULT,
+        // and a MANAGED resource is not dynamic.
+        if((usage&(D3DUSAGE_RENDERTARGET|D3DUSAGE_DEPTHSTENCIL))&&
+           (pool!=D3DPOOL_DEFAULT||(usage&D3DUSAGE_DYNAMIC)))return D3DERR_INVALIDCALL;
+        if((usage&D3DUSAGE_DYNAMIC)&&pool==D3DPOOL_MANAGED)return D3DERR_INVALIDCALL;
+        ID3D11Texture2D* texture=nullptr;
+        HRESULT hr=createTexture2D(edgeLength,edgeLength,levels,usage,format,pool,&texture,true);
+        if(FAILED(hr))return hr;
+        auto wrapper=d3dshim::create<CubeTexture>();
+        if(!wrapper){texture->Release();return E_OUTOFMEMORY;}
+        wrapper->texture=texture;
+        wrapper->inner=texture;
+        wrapper->device=static_cast<IDirect3DDevice9*>(self);
+        wrapper->device11=device();
+        wrapper->context=context();
+        wrapper->cpuVisible=usageFor(pool,usage)!=D3D11_USAGE_DEFAULT;
+        // The GPU texture of a MANAGED or DYNAMIC cube has no CPU access, so it
+        // gets a staging copy to lock through. Staging cannot be a cube.
+        if(pool==D3DPOOL_MANAGED||(usage&D3DUSAGE_DYNAMIC)) {
+            D3D11_TEXTURE2D_DESC shadowDesc{};
+            texture->GetDesc(&shadowDesc);
+            shadowDesc.Usage=D3D11_USAGE_STAGING;
+            shadowDesc.BindFlags=0;
+            shadowDesc.MiscFlags=0;
+            shadowDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ|D3D11_CPU_ACCESS_WRITE;
+            if(FAILED(device()->CreateTexture2D(&shadowDesc,nullptr,&wrapper->shadow))) {
+                d3dshim::destroy(wrapper);
+                return D3DERR_INVALIDCALL;
+            }
+            wrapper->cpuVisible=true;
+        }
+        wrapper->format=format;
+        wrapper->usage=usage;
+        wrapper->pool=pool;
+        wrapper->edge=edgeLength;
+        wrapper->levels=levels?levels:mipChain(edgeLength,edgeLength);
+        // A staging cube or a depth cube cannot be sampled and has no view.
+        D3D11_TEXTURE2D_DESC made{};
+        texture->GetDesc(&made);
+        if(made.BindFlags&D3D11_BIND_SHADER_RESOURCE) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+            view.Format=dxgiFormat(format);
+            view.ViewDimension=D3D11_SRV_DIMENSION_TEXTURECUBE;
+            view.TextureCube.MostDetailedMip=0;
+            view.TextureCube.MipLevels=wrapper->levels;
+            if(FAILED(device()->CreateShaderResourceView(texture,&view,&wrapper->view))) {
+                d3dshim::destroy(wrapper);
+                return D3DERR_INVALIDCALL;
+            }
+        }
+        *out=wrapper;
+        return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE CreateVertexBuffer(UINT length,DWORD usage,DWORD fvf,D3DPOOL pool,
                                                  IDirect3DVertexBuffer9** out,HANDLE*) override {
@@ -1645,8 +1842,21 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     HRESULT STDMETHODCALLTYPE UpdateSurface(IDirect3DSurface9*,const RECT*,IDirect3DSurface9*,const POINT*) override {
         return D3DERR_INVALIDCALL;
     }
-    HRESULT STDMETHODCALLTYPE UpdateTexture(IDirect3DBaseTexture9*,IDirect3DBaseTexture9*) override {
-        return D3DERR_INVALIDCALL;
+    // Only cube textures are copied so far (SYSTEMMEM to DEFAULT, every face and
+    // the levels both have); a pair of different types is refused, as in D3D9.
+    HRESULT STDMETHODCALLTYPE UpdateTexture(IDirect3DBaseTexture9* source,IDirect3DBaseTexture9* destination) override {
+        if(!source||!destination||source->GetType()!=destination->GetType())return D3DERR_INVALIDCALL;
+        if(source->GetType()!=D3DRTYPE_CUBETEXTURE)return D3DERR_INVALIDCALL;
+        auto src=static_cast<CubeTexture*>(source);
+        auto dst=static_cast<CubeTexture*>(destination);
+        if(src->pool!=D3DPOOL_SYSTEMMEM||dst->pool!=D3DPOOL_DEFAULT||src->format!=dst->format||
+           src->edge!=dst->edge)return D3DERR_INVALIDCALL;
+        const UINT shared=src->levels<dst->levels?src->levels:dst->levels;
+        for(UINT face=0;face<CubeTexture::faces;++face)
+            for(UINT level=0;level<shared;++level)
+                context()->CopySubresourceRegion(dst->texture,face*dst->levels+level,0,0,0,
+                                                 src->texture,face*src->levels+level,nullptr);
+        return D3D_OK;
     }
     // A render target's pixels copied into a SYSTEMMEM surface, which is how a
     // game takes a screenshot and how the off-device fixtures read back what
@@ -1668,7 +1878,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         if(src->desc.Width!=dst->desc.Width||src->desc.Height!=dst->desc.Height
                 ||src->desc.Format!=dst->desc.Format)return D3DERR_INVALIDCALL;
         // CopyResource would copy the whole texture; these are subresources.
-        context()->CopySubresourceRegion(dst->texture,dst->level,0,0,0,src->texture,src->level,nullptr);
+        context()->CopySubresourceRegion(dst->texture,dst->subresource,0,0,0,src->texture,src->subresource,nullptr);
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE GetFrontBufferData(UINT,IDirect3DSurface9*) override { return D3DERR_INVALIDCALL; }
@@ -2288,7 +2498,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
             // D3D9 samples a stage with no texture as white, so an untextured
             // draw keeps its diffuse colour under the default modulate op;
             // D3D11 would sample a null view as black.
-            views[i]=textures[i]?static_cast<Texture*>(textures[i])->view:defaultView;
+            views[i]=textures[i]?viewOfTexture(textures[i]):defaultView;
         }
         // D3D9 binds textures per stage and the translator emits one sampler and
         // one texture binding per stage in the same order, so the D3D11 slots
@@ -3124,6 +3334,8 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     // ResizeBuffers path of its own, so a fresh chain is the honest
     // implementation.
     HRESULT rebuildSwapChain(D3DPRESENT_PARAMETERS* parameters) {
+        // A reset ends a recording, for Reset and ResetEx alike.
+        if(recording){recording->Release();recording=nullptr;}
         D3DPRESENT_PARAMETERS candidate=*parameters;
         if(candidate.BackBufferFormat==D3DFMT_UNKNOWN&&!candidate.Windowed)return D3DERR_INVALIDCALL;
         if(candidate.BackBufferFormat!=D3DFMT_UNKNOWN&&dxgiFormat(candidate.BackBufferFormat)==DXGI_FORMAT_UNKNOWN)return D3DERR_INVALIDCALL;

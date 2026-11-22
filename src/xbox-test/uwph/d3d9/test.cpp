@@ -165,6 +165,45 @@ static bool sameViewport(const D3DVIEWPORT9& a,const D3DVIEWPORT9& b) {
 static bool sameRect(const RECT& a,const RECT& b) {
     return a.left==b.left&&a.top==b.top&&a.right==b.right&&a.bottom==b.bottom;
 }
+// Cube-texture fixtures. Every (face, level) gets its own colour so a copy that
+// lands in the wrong subresource shows.
+static DWORD cubePattern(UINT face,UINT level) {
+    return 0xff000000u|DWORD((face+1)*0x20)<<16|DWORD((level+1)*0x10)<<8|DWORD(face*16+level+1);
+}
+static void fillLocked(const D3DLOCKED_RECT& locked,UINT size,DWORD value) {
+    for(UINT y=0;y<size;++y) {
+        DWORD* row=reinterpret_cast<DWORD*>(static_cast<unsigned char*>(locked.pBits)+y*locked.Pitch);
+        for(UINT x=0;x<size;++x)row[x]=value;
+    }
+}
+// Reads one face/level of a cube back through a SYSTEMMEM copy and compares
+// every texel (under `mask`) with `expect`.
+static bool cubeLevelIs(IDirect3DDevice9Ex* device,IDirect3DCubeTexture9* cube,UINT face,UINT level,
+                        DWORD expect,DWORD mask) {
+    IDirect3DSurface9* surface=nullptr;
+    IDirect3DSurface9* staging=nullptr;
+    bool ok=false;
+    D3DSURFACE_DESC desc{};
+    if(SUCCEEDED(cube->GetLevelDesc(level,&desc))
+            &&SUCCEEDED(cube->GetCubeMapSurface(D3DCUBEMAP_FACES(face),level,&surface))&&surface
+            &&SUCCEEDED(device->CreateOffscreenPlainSurface(desc.Width,desc.Height,desc.Format,
+                D3DPOOL_SYSTEMMEM,&staging,nullptr))&&staging
+            &&SUCCEEDED(device->GetRenderTargetData(surface,staging))) {
+        D3DLOCKED_RECT locked{};
+        if(SUCCEEDED(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY))&&locked.pBits) {
+            ok=true;
+            for(UINT y=0;y<desc.Height;++y) {
+                const DWORD* row=reinterpret_cast<const DWORD*>(
+                    static_cast<const unsigned char*>(locked.pBits)+y*locked.Pitch);
+                for(UINT x=0;x<desc.Width;++x)if((row[x]&mask)!=(expect&mask))ok=false;
+            }
+            staging->UnlockRect();
+        }
+    }
+    if(staging)staging->Release();
+    if(surface)surface->Release();
+    return ok;
+}
 
 extern "C" DWORD WINAPI d3d9_test_entry() {
     HMODULE module=loadShim();
@@ -292,6 +331,8 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
     CHECK(creation.hFocusWindow==window&&creation.DeviceType==D3DDEVTYPE_HAL);
     CHECK_HR(device->GetDeviceCaps(&caps));
     CHECK(caps.VertexShaderVersion==D3DVS_VERSION(3,0));
+    CHECK((caps.TextureCaps&(D3DPTEXTURECAPS_CUBEMAP|D3DPTEXTURECAPS_MIPCUBEMAP))
+        ==(D3DPTEXTURECAPS_CUBEMAP|D3DPTEXTURECAPS_MIPCUBEMAP));
     IDirect3D9* owner=nullptr;
     CHECK_HR(device->GetDirect3D(&owner));
     CHECK(owner==static_cast<IDirect3D9*>(ex));
@@ -1897,6 +1938,308 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
         CHECK(refsOf(device)==blockBase);
     }
 
+    // Cube textures: creation rules, the object model, per-face locking, every
+    // face and level reaching the GPU texture, UpdateTexture, rendering into a
+    // face, a draw with a cube bound, and state blocks carrying a bound cube.
+    {
+        const ULONG cubeBase=refsOf(device);
+        IDirect3DCubeTexture9* cube=nullptr;
+        auto poison=[&]{cube=reinterpret_cast<IDirect3DCubeTexture9*>(device);};
+        poison();
+        CHECK_HR_IS(device->CreateCubeTexture(8,0,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,nullptr,nullptr),
+            D3DERR_INVALIDCALL);
+        CHECK_HR_IS(device->CreateCubeTexture(0,0,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&cube,nullptr),
+            D3DERR_INVALIDCALL);
+        CHECK(cube==nullptr);
+        poison();   // a format with no DXGI equivalent
+        CHECK_HR_IS(device->CreateCubeTexture(8,0,0,D3DFMT_R8G8B8,D3DPOOL_MANAGED,&cube,nullptr),
+            D3DERR_INVALIDCALL);
+        CHECK(cube==nullptr);
+        poison();   // not a pool
+        CHECK_HR_IS(device->CreateCubeTexture(8,0,0,D3DFMT_A8R8G8B8,D3DPOOL(9),&cube,nullptr),
+            D3DERR_INVALIDCALL);
+        CHECK(cube==nullptr);
+        poison();   // a render target lives in DEFAULT
+        CHECK_HR_IS(device->CreateCubeTexture(8,1,D3DUSAGE_RENDERTARGET,D3DFMT_X8R8G8B8,D3DPOOL_MANAGED,
+            &cube,nullptr),D3DERR_INVALIDCALL);
+        CHECK(cube==nullptr);
+        poison();   // a MANAGED resource is not dynamic
+        CHECK_HR_IS(device->CreateCubeTexture(8,1,D3DUSAGE_DYNAMIC,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,
+            &cube,nullptr),D3DERR_INVALIDCALL);
+        CHECK(cube==nullptr);
+        poison();   // an 8x8 chain has four levels
+        CHECK_HR_IS(device->CreateCubeTexture(8,5,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&cube,nullptr),
+            D3DERR_INVALIDCALL);
+        CHECK(cube==nullptr);
+
+        // ---- MANAGED: the object model, locking and the GPU copy
+        CHECK_HR(device->CreateCubeTexture(8,0,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&cube,nullptr));
+        if(cube) {
+            CHECK(cube->GetType()==D3DRTYPE_CUBETEXTURE);
+            CHECK(cube->GetLevelCount()==4);
+            IDirect3DBaseTexture9* asBase=nullptr;
+            IDirect3DResource9* asResource=nullptr;
+            IDirect3DCubeTexture9* asCube=nullptr;
+            IDirect3DTexture9* asTexture=nullptr;
+            CHECK_HR(cube->QueryInterface(__uuidof(IDirect3DBaseTexture9),reinterpret_cast<void**>(&asBase)));
+            CHECK_HR(cube->QueryInterface(__uuidof(IDirect3DResource9),reinterpret_cast<void**>(&asResource)));
+            CHECK_HR(cube->QueryInterface(__uuidof(IDirect3DCubeTexture9),reinterpret_cast<void**>(&asCube)));
+            CHECK_HR_IS(cube->QueryInterface(__uuidof(IDirect3DTexture9),reinterpret_cast<void**>(&asTexture)),
+                E_NOINTERFACE);
+            CHECK(asBase!=nullptr&&asResource!=nullptr&&asCube==cube&&asTexture==nullptr);
+            if(asBase){CHECK(asBase->GetType()==D3DRTYPE_CUBETEXTURE);asBase->Release();}
+            if(asResource)asResource->Release();
+            if(asCube)asCube->Release();
+            IDirect3DDevice9* owning=nullptr;
+            CHECK_HR(cube->GetDevice(&owning));
+            CHECK(owning==static_cast<IDirect3DDevice9*>(device));
+            if(owning)owning->Release();
+            CHECK(cube->SetLOD(2)==0&&cube->GetLOD()==2);
+            CHECK(cube->GetAutoGenFilterType()==D3DTEXF_LINEAR);
+            CHECK_HR(cube->SetAutoGenFilterType(D3DTEXF_POINT));
+            CHECK(cube->GetAutoGenFilterType()==D3DTEXF_POINT);
+            cube->GenerateMipSubLevels();
+            for(UINT level=0;level<4;++level) {
+                D3DSURFACE_DESC desc{};
+                CHECK_HR(cube->GetLevelDesc(level,&desc));
+                CHECK(desc.Width==(8u>>level)&&desc.Height==(8u>>level)&&desc.Format==D3DFMT_A8R8G8B8);
+                CHECK(desc.Type==D3DRTYPE_SURFACE&&desc.Pool==D3DPOOL_MANAGED&&desc.Usage==0);
+                CHECK(desc.MultiSampleType==D3DMULTISAMPLE_NONE&&desc.MultiSampleQuality==0);
+            }
+            D3DSURFACE_DESC badDesc{};
+            CHECK_HR_IS(cube->GetLevelDesc(4,&badDesc),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(cube->GetLevelDesc(0,nullptr),D3DERR_INVALIDCALL);
+
+            // Arguments.
+            D3DLOCKED_RECT locked{};
+            CHECK_HR_IS(cube->LockRect(D3DCUBEMAP_FACE_POSITIVE_X,0,nullptr,nullptr,0),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(cube->LockRect(D3DCUBEMAP_FACES(6),0,&locked,nullptr,0),D3DERR_INVALIDCALL);
+            CHECK(locked.pBits==nullptr);
+            CHECK_HR_IS(cube->LockRect(D3DCUBEMAP_FACE_POSITIVE_X,4,&locked,nullptr,0),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(cube->UnlockRect(D3DCUBEMAP_FACE_POSITIVE_X,0),D3DERR_INVALIDCALL);   // not locked
+            CHECK_HR_IS(cube->UnlockRect(D3DCUBEMAP_FACES(6),0),D3DERR_INVALIDCALL);
+            const RECT dirty={0,0,2,2};
+            for(UINT face=0;face<6;++face) {
+                CHECK_HR(cube->AddDirtyRect(D3DCUBEMAP_FACES(face),nullptr));
+                CHECK_HR(cube->AddDirtyRect(D3DCUBEMAP_FACES(face),&dirty));
+            }
+            CHECK_HR_IS(cube->AddDirtyRect(D3DCUBEMAP_FACES(6),nullptr),D3DERR_INVALIDCALL);
+            IDirect3DSurface9* bad=reinterpret_cast<IDirect3DSurface9*>(device);
+            CHECK_HR_IS(cube->GetCubeMapSurface(D3DCUBEMAP_FACES(6),0,&bad),D3DERR_INVALIDCALL);
+            CHECK(bad==nullptr);
+            bad=reinterpret_cast<IDirect3DSurface9*>(device);
+            CHECK_HR_IS(cube->GetCubeMapSurface(D3DCUBEMAP_FACE_POSITIVE_X,4,&bad),D3DERR_INVALIDCALL);
+            CHECK(bad==nullptr);
+            CHECK_HR_IS(cube->GetCubeMapSurface(D3DCUBEMAP_FACE_POSITIVE_X,0,nullptr),D3DERR_INVALIDCALL);
+
+            // Two faces locked at once, each its own subresource.
+            D3DLOCKED_RECT second{},third{};
+            CHECK_HR(cube->LockRect(D3DCUBEMAP_FACE_POSITIVE_X,0,&locked,nullptr,0));
+            CHECK_HR(cube->LockRect(D3DCUBEMAP_FACE_NEGATIVE_X,0,&second,nullptr,0));
+            CHECK_HR_IS(cube->LockRect(D3DCUBEMAP_FACE_POSITIVE_X,0,&third,nullptr,0),D3DERR_INVALIDCALL);
+            CHECK(locked.pBits!=nullptr&&second.pBits!=nullptr&&locked.pBits!=second.pBits);
+            CHECK_HR_IS(cube->UnlockRect(D3DCUBEMAP_FACE_POSITIVE_X,1),D3DERR_INVALIDCALL);   // another level
+            CHECK_HR(cube->UnlockRect(D3DCUBEMAP_FACE_NEGATIVE_X,0));
+            CHECK_HR(cube->UnlockRect(D3DCUBEMAP_FACE_POSITIVE_X,0));
+            CHECK_HR_IS(cube->UnlockRect(D3DCUBEMAP_FACE_POSITIVE_X,0),D3DERR_INVALIDCALL);
+
+            // Every face and level, each written with its own colour.
+            for(UINT face=0;face<6;++face)
+                for(UINT level=0;level<4;++level) {
+                    CHECK_HR(cube->LockRect(D3DCUBEMAP_FACES(face),level,&locked,nullptr,0));
+                    if(locked.pBits)fillLocked(locked,8u>>level,cubePattern(face,level));
+                    CHECK_HR(cube->UnlockRect(D3DCUBEMAP_FACES(face),level));
+                }
+            // The writes reached the GPU texture, each in its own subresource.
+            bool allThere=true;
+            for(UINT face=0;face<6;++face)
+                for(UINT level=0;level<4;++level)
+                    if(!cubeLevelIs(device,cube,face,level,cubePattern(face,level),0xffffffffu))allThere=false;
+            CHECK(allThere);
+            // A read-only lock reads what was written.
+            CHECK_HR(cube->LockRect(D3DCUBEMAP_FACE_POSITIVE_Z,1,&locked,nullptr,D3DLOCK_READONLY));
+            if(locked.pBits)CHECK(*static_cast<const DWORD*>(locked.pBits)==cubePattern(4,1));
+            CHECK_HR(cube->UnlockRect(D3DCUBEMAP_FACE_POSITIVE_Z,1));
+
+            // A face surface: its own references, container, and lock.
+            IDirect3DSurface9* face=nullptr;
+            const ULONG cubeRefs=refsOf(cube);
+            CHECK_HR(cube->GetCubeMapSurface(D3DCUBEMAP_FACE_NEGATIVE_Y,2,&face));
+            CHECK(face!=nullptr&&refsOf(cube)==cubeRefs+1);
+            if(face) {
+                D3DSURFACE_DESC desc{};
+                CHECK_HR(face->GetDesc(&desc));
+                CHECK(desc.Width==2&&desc.Height==2&&desc.Format==D3DFMT_A8R8G8B8&&desc.Pool==D3DPOOL_MANAGED);
+                IDirect3DCubeTexture9* container=nullptr;
+                CHECK_HR(face->GetContainer(__uuidof(IDirect3DCubeTexture9),reinterpret_cast<void**>(&container)));
+                CHECK(container==cube);
+                if(container)container->Release();
+                CHECK_HR_IS(device->SetRenderTarget(0,face),D3DERR_INVALIDCALL);   // not a render target
+                CHECK_HR(face->LockRect(&locked,nullptr,0));
+                if(locked.pBits)fillLocked(locked,2,0xff112233u);
+                CHECK_HR(face->UnlockRect());
+                CHECK(cubeLevelIs(device,cube,3,2,0xff112233u,0xffffffffu));
+                CHECK(cubeLevelIs(device,cube,2,2,cubePattern(2,2),0xffffffffu));   // neighbours untouched
+                // The face outlives the cube wrapper and still locks.
+                cube->Release();
+                cube=nullptr;
+                CHECK_HR(face->LockRect(&locked,nullptr,D3DLOCK_READONLY));
+                if(locked.pBits)CHECK(*static_cast<const DWORD*>(locked.pBits)==0xff112233u);
+                CHECK_HR(face->UnlockRect());
+                face->Release();
+            }
+            if(cube){cube->Release();cube=nullptr;}
+        }
+
+        // ---- SYSTEMMEM to DEFAULT through UpdateTexture
+        IDirect3DCubeTexture9* sys=nullptr;
+        IDirect3DCubeTexture9* gpu=nullptr;
+        CHECK_HR(device->CreateCubeTexture(4,0,0,D3DFMT_A8R8G8B8,D3DPOOL_SYSTEMMEM,&sys,nullptr));
+        CHECK_HR(device->CreateCubeTexture(4,0,0,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,&gpu,nullptr));
+        if(sys&&gpu) {
+            CHECK(sys->GetLevelCount()==3&&gpu->GetLevelCount()==3);
+            D3DLOCKED_RECT locked{};
+            for(UINT face=0;face<6;++face)
+                for(UINT level=0;level<3;++level) {
+                    CHECK_HR(sys->LockRect(D3DCUBEMAP_FACES(face),level,&locked,nullptr,0));
+                    if(locked.pBits)fillLocked(locked,4u>>level,cubePattern(face,level));
+                    CHECK_HR(sys->UnlockRect(D3DCUBEMAP_FACES(face),level));
+                }
+            CHECK_HR_IS(gpu->LockRect(D3DCUBEMAP_FACE_POSITIVE_X,0,&locked,nullptr,0),D3DERR_INVALIDCALL);
+            CHECK_HR(device->UpdateTexture(sys,gpu));
+            bool allThere=true;
+            for(UINT face=0;face<6;++face)
+                for(UINT level=0;level<3;++level)
+                    if(!cubeLevelIs(device,gpu,face,level,cubePattern(face,level),0xffffffffu))allThere=false;
+            CHECK(allThere);
+            // Refused pairs: wrong direction, null, another size, another type.
+            CHECK_HR_IS(device->UpdateTexture(gpu,sys),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(device->UpdateTexture(nullptr,gpu),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(device->UpdateTexture(sys,nullptr),D3DERR_INVALIDCALL);
+            IDirect3DCubeTexture9* bigger=nullptr;
+            CHECK_HR(device->CreateCubeTexture(8,1,0,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,&bigger,nullptr));
+            if(bigger){CHECK_HR_IS(device->UpdateTexture(sys,bigger),D3DERR_INVALIDCALL);bigger->Release();}
+            IDirect3DTexture9* flat=nullptr;
+            CHECK_HR(device->CreateTexture(4,4,3,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&flat,nullptr));
+            if(flat) {
+                CHECK_HR_IS(device->UpdateTexture(flat,gpu),D3DERR_INVALIDCALL);
+                CHECK_HR_IS(device->UpdateTexture(sys,flat),D3DERR_INVALIDCALL);
+                flat->Release();
+            }
+        }
+        if(sys)sys->Release();
+        if(gpu)gpu->Release();
+
+        // ---- DYNAMIC in DEFAULT: lockable, and the write reaches the texture
+        poison();
+        CHECK_HR(device->CreateCubeTexture(4,1,D3DUSAGE_DYNAMIC,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,&cube,nullptr));
+        if(cube) {
+            D3DLOCKED_RECT locked{};
+            CHECK_HR(cube->LockRect(D3DCUBEMAP_FACE_NEGATIVE_Z,0,&locked,nullptr,D3DLOCK_DISCARD));
+            if(locked.pBits)fillLocked(locked,4,0xff445566u);
+            CHECK_HR(cube->UnlockRect(D3DCUBEMAP_FACE_NEGATIVE_Z,0));
+            CHECK(cubeLevelIs(device,cube,5,0,0xff445566u,0xffffffffu));
+            cube->Release();
+        }
+
+        // ---- a render-target cube: clear each face, then draw with it bound
+        IDirect3DSurface9* target=nullptr;
+        IDirect3DSurface9* staging=nullptr;
+        CHECK_HR(device->CreateRenderTarget(64,64,D3DFMT_X8R8G8B8,D3DMULTISAMPLE_NONE,0,FALSE,&target,nullptr));
+        CHECK_HR(device->CreateOffscreenPlainSurface(64,64,D3DFMT_X8R8G8B8,D3DPOOL_SYSTEMMEM,&staging,nullptr));
+        IDirect3DVertexBuffer9* clip=clipTriangle(device);
+        IDirect3DVertexShader9* vsPass=nullptr;
+        IDirect3DPixelShader9* psColour=nullptr;
+        CHECK_HR(device->CreateVertexShader(passVs,&vsPass));
+        CHECK_HR(device->CreatePixelShader(constantPs0,&psColour));
+        const D3DVERTEXELEMENT9 positionOnly[]={
+            {0,0,D3DDECLTYPE_FLOAT3,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_POSITION,0},D3DDECL_END()};
+        IDirect3DVertexDeclaration9* decl=nullptr;
+        CHECK_HR(device->CreateVertexDeclaration(positionOnly,&decl));
+        poison();
+        CHECK_HR(device->CreateCubeTexture(8,1,D3DUSAGE_RENDERTARGET,D3DFMT_X8R8G8B8,D3DPOOL_DEFAULT,&cube,nullptr));
+        static const DWORD faceColour[6]={0xffff0000,0xff00ff00,0xff0000ff,0xffffff00,0xff00ffff,0xffff00ff};
+        if(cube&&target&&staging&&clip&&vsPass&&psColour&&decl) {
+            D3DSURFACE_DESC desc{};
+            CHECK_HR(cube->GetLevelDesc(0,&desc));
+            CHECK((desc.Usage&D3DUSAGE_RENDERTARGET)&&desc.Pool==D3DPOOL_DEFAULT);
+            for(UINT face=0;face<6;++face) {
+                IDirect3DSurface9* surface=nullptr;
+                CHECK_HR(cube->GetCubeMapSurface(D3DCUBEMAP_FACES(face),0,&surface));
+                if(surface) {
+                    CHECK_HR(device->SetRenderTarget(0,surface));
+                    IDirect3DSurface9* current=nullptr;
+                    CHECK_HR(device->GetRenderTarget(0,&current));
+                    CHECK(current==surface);
+                    if(current)current->Release();
+                    CHECK_HR(device->Clear(0,nullptr,D3DCLEAR_TARGET,faceColour[face],1.0f,0));
+                    surface->Release();
+                }
+            }
+            bool allThere=true;
+            for(UINT face=0;face<6;++face)
+                if(!cubeLevelIs(device,cube,face,0,faceColour[face],0x00ffffffu))allThere=false;
+            CHECK(allThere);
+            // A draw with the cube bound: the sampler stage hands the device the
+            // cube's own view, so the draw still lands and nothing treats the
+            // cube as a 2D texture. (The pinned shader translator reads two
+            // texld coordinate components, so a cube lookup itself is not drawn.)
+            CHECK_HR(device->SetVertexShader(vsPass));
+            CHECK_HR(device->SetPixelShader(psColour));
+            CHECK_HR(device->SetVertexDeclaration(decl));
+            CHECK_HR(device->SetStreamSource(0,clip,0,3*sizeof(float)));
+            CHECK_HR(device->SetTexture(0,cube));
+            static const float green[4]={0,1,0,1},magenta[4]={1,0,1,1};
+            CHECK_HR(device->SetPixelShaderConstantF(0,green,1));
+            CHECK(drawAndRead(device,target,staging,32,32)==0x00ff00);
+            // State blocks carry a bound cube without mistaking it for a 2D texture.
+            const ULONG held=refsOf(cube);
+            IDirect3DStateBlock9* all=nullptr;
+            CHECK_HR(device->CreateStateBlock(D3DSBT_ALL,&all));
+            CHECK(refsOf(cube)==held+1);
+            CHECK_HR(device->SetTexture(0,nullptr));
+            if(all)CHECK_HR(all->Apply());
+            IDirect3DBaseTexture9* got=nullptr;
+            CHECK_HR(device->GetTexture(0,&got));
+            CHECK(got==static_cast<IDirect3DBaseTexture9*>(cube));
+            if(got)got->Release();
+            CHECK_HR(device->SetPixelShaderConstantF(0,magenta,1));
+            CHECK(drawAndRead(device,target,staging,32,32)==0xff00ff);
+            if(all)all->Release();
+            CHECK(refsOf(cube)==held);
+            // A recorded block holds it too, and Apply binds it.
+            IDirect3DStateBlock9* recorded=nullptr;
+            CHECK_HR(device->BeginStateBlock());
+            CHECK_HR(device->SetTexture(3,cube));
+            CHECK_HR(device->EndStateBlock(&recorded));
+            CHECK_HR(device->GetTexture(3,&got));
+            CHECK(got==nullptr);   // recording changed no device state
+            CHECK(recorded!=nullptr&&refsOf(cube)==held+1);
+            if(recorded) {
+                CHECK_HR(recorded->Apply());
+                CHECK_HR(device->GetTexture(3,&got));
+                CHECK(got==static_cast<IDirect3DBaseTexture9*>(cube));
+                if(got)got->Release();
+                recorded->Release();
+            }
+            CHECK_HR(device->SetTexture(3,nullptr));
+            CHECK_HR(device->SetTexture(0,nullptr));
+            CHECK(refsOf(cube)==held-1);   // the test's own reference is all that is left
+            CHECK_HR(device->SetVertexShader(nullptr));
+            CHECK_HR(device->SetPixelShader(nullptr));
+            CHECK_HR(device->SetStreamSource(0,nullptr,0,0));
+            CHECK_HR(device->SetRenderTarget(0,backBuffer));
+        }
+        if(cube)cube->Release();
+        if(decl)decl->Release();
+        if(psColour)psColour->Release();
+        if(vsPass)vsPass->Release();
+        if(clip)clip->Release();
+        if(staging)staging->Release();
+        if(target)target->Release();
+        CHECK(refsOf(device)==cubeBase);
+    }
+
     // A query outlives a Reset: it holds the device and its context, which Reset
     // keeps. An open state-block recording is dropped by Reset.
     IDirect3DQuery9* survivor=nullptr;
@@ -1923,6 +2266,22 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
     CHECK_HR(device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&afterReset));
     CHECK(afterReset!=nullptr);
     if(afterReset)afterReset->Release();
+
+    // ResetEx ends a recording exactly as Reset does.
+    CHECK_HR(device->BeginStateBlock());
+    CHECK_HR(device->ResetEx(&present,nullptr));
+    {
+        IDirect3DStateBlock9* afterResetEx=reinterpret_cast<IDirect3DStateBlock9*>(device);
+        CHECK_HR_IS(device->EndStateBlock(&afterResetEx),D3DERR_INVALIDCALL);
+        CHECK(afterResetEx==nullptr);
+    }
+    CHECK(refsOf(device)==deviceRefs);
+    CHECK_HR(device->BeginStateBlock());   // and a new recording can begin
+    {
+        IDirect3DStateBlock9* fresh=nullptr;
+        CHECK_HR(device->EndStateBlock(&fresh));
+        if(fresh)fresh->Release();
+    }
 
     // Release everything the guest holds before the device: Wine never finishes
     // process exit while a D3D object outlives its device.
