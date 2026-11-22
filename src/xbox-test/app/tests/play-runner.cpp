@@ -21,6 +21,9 @@ static HMODULE WINAPI hostPackaged(LPCWSTR name,DWORD) {
 // This is deterministic contention, not a sleep-based vector crash race.
 static bool probeLoaderLock=false, hideModuleFilename=false;
 static unsigned loaderLockChecks=0, loaderLockFailures=0;
+// Mode "lobbies": the round trips the fake CM served, so the mode can tell the
+// launcher's tap answered the guest and the provider's stand-in did not.
+static std::atomic<int> lobbyCreates{0}, lobbyLists{0}, lobbyJoins{0}, lobbyLeaves{0};
 static void observeLoaderLock();
 static DWORD WINAPI hostFilename(HMODULE h,LPWSTR out,DWORD size) {
     if(probeLoaderLock)observeLoaderLock();
@@ -551,12 +554,62 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
                 return std::optional<std::vector<play_runtime::LeaderboardTap::Row>>(std::move(out));}});
         logline("PRUN leaderboard bridge staged (off-device fixture backend)");
     }
+    // Lobby callback splice (steam_matchmaking.h): the same policy the launcher
+    // runs, driven by a fake CM that answers the CMsgClientMMS* shapes. The
+    // guest's CreateLobby/RequestLobbyList/JoinLobby are answered with launcher
+    // handles once it has called ManualDispatch_Init, and the provider's own
+    // queued callbacks still reach it. Lobby ids are fixture values.
+    if(std::string(args)=="lobbies") {
+        steam_matchmaking::Config config;
+        config.bridge=std::make_shared<steam_lobbies::Bridge>();
+        config.appid=3405340;
+        config.persona="Fixture Owner";
+        config.io.call=[](uint32_t emsg,uint32_t routing,const std::string& body,std::string& out){
+            // Steam answers no MMS request that does not carry the app id.
+            if(routing!=3405340)return false;
+            if(emsg==steam_lobbies::CreateLobby) {
+                ++lobbyCreates;
+                pb_u(out,1,3405340);pb_fixed64(out,2,0x1100001000777ull);pb_u(out,3,1);
+                return true;
+            }
+            if(emsg==steam_lobbies::GetLobbyData) {
+                std::string member;pb_fixed64(member,1,0x110000100000001ull);pb_s(member,2,"Fixture Owner");
+                pb_u(out,1,3405340);pb_fixed64(out,2,0x1100001000777ull);pb_u(out,4,4);pb_u(out,5,2);
+                pb_fixed64(out,7,0x110000100000001ull);pb_s(out,9,member);
+                return true;
+            }
+            if(emsg==steam_lobbies::GetLobbyList) {
+                ++lobbyLists;
+                pb_u(out,1,3405340);pb_u(out,3,1);
+                for(uint64_t id:{0x1100001000010ull,0x1100001000020ull}){std::string row;pb_fixed64(row,1,id);pb_s(out,4,row);}
+                return true;
+            }
+            if(emsg==steam_lobbies::JoinLobby) {
+                ++lobbyJoins;
+                uint64_t id=0;for(auto& f:pb_parse(body))if(f.f==2)id=f.u;
+                pb_u(out,1,3405340);pb_fixed64(out,2,id);pb_u(out,3,1);pb_u(out,4,4);pb_u(out,5,2);
+                pb_fixed64(out,7,0x110000100000002ull);
+                return true;
+            }
+            if(emsg==steam_lobbies::LeaveLobby) {
+                ++lobbyLeaves;
+                pb_u(out,1,3405340);pb_u(out,3,1);
+                return true;
+            }
+            return false;
+        };
+        config.io.log=[](const std::string& line){logline(("STEAM "+line).c_str());};
+        // Off the game's thread, as the launcher's CM session answers.
+        config.executor=[](std::function<void()> task){std::thread(std::move(task)).detach();};
+        play_runtime::set_matchmaking_tap({std::make_shared<steam_matchmaking::Service>(std::move(config))});
+        logline("PRUN matchmaking tap staged (off-device fixture backend)");
+    }
     // Game mode runs Megabonk unless PRUN_GAME_EXE names another owned game.
     // Engine options come from the game's files, as in the launcher.
     std::wstring gameExe=L"Megabonk.exe";
     {wchar_t value[260];DWORD n=GetEnvironmentVariableW(L"PRUN_GAME_EXE",value,260);if(n&&n<260)gameExe.assign(value,n);}
     const bool crashContextOptIn=std::string(args)=="crashctx-on";
-    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="gap"?L"play-gap.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="loader-reentrant"?L"play-init-order.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d10-triangle"?L"play-d3d10-triangle.exe":std::string(args)=="d3d10-compile"?L"play-d3d10-compile.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-triangle-variants"?L"play-d3d9-triangle-variants.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="fault-in-dll"?L"play-fault-guest.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":std::string(args)=="vulkan-draw"?L"play-vulkan-draw.exe":std::string(args)=="opengl"?L"play-opengl.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline,std::wstring(),crashContextOptIn))return 1;
+    if(!play_runtime::start(root,game?gameExe.c_str():std::string(args)=="missing"?L"play-missing.exe":std::string(args)=="gap"?L"play-gap.exe":std::string(args)=="crt-exit"?L"play-crt-exit.exe":std::string(args)=="crt-abort"?L"play-crt-abort.exe":std::string(args)=="failed-dependency"?L"play-failed-dependency.exe":std::string(args)=="static-steam"?L"play-steam.exe":std::string(args)=="loader-reentrant"?L"play-init-order.exe":std::string(args)=="slot0"?L"play-slot0.exe":std::string(args)=="d3d11-diag"?L"play-d3d11.exe":std::string(args)=="d3d12-diag"?L"play-d3d12.exe":std::string(args)=="d3d10-diag"?L"play-d3d10.exe":std::string(args)=="d3d10-triangle"?L"play-d3d10-triangle.exe":std::string(args)=="d3d10-compile"?L"play-d3d10-compile.exe":std::string(args)=="d3d9-diag"?L"play-d3d9.exe":std::string(args)=="d3d9-triangle"?L"play-d3d9-triangle.exe":std::string(args)=="d3d9-triangle-variants"?L"play-d3d9-triangle-variants.exe":std::string(args)=="d3d9-textured"?L"play-d3d9-textured.exe":std::string(args)=="fault-in-dll"?L"play-fault-guest.exe":std::string(args)=="discord-sdk"?L"play-discord.exe":std::string(args)=="leaderboards"?L"play-leaderboard.exe":std::string(args)=="lobbies"?L"play-lobby.exe":std::string(args)=="vulkan"?L"play-vulkan.exe":std::string(args)=="vulkan-dzn"?L"play-vulkan-dzn.exe":std::string(args)=="vulkan-draw"?L"play-vulkan-draw.exe":std::string(args)=="opengl"?L"play-opengl.exe":L"play-guest.exe",game?play_runtime::wide(launch_target::arguments(nullptr,GetFileAttributesW((root+L"\\UnityPlayer.dll").c_str())!=INVALID_FILE_ATTRIBUTES).c_str()):play_runtime::wide(args),logline,std::wstring(),crashContextOptIn))return 1;
     auto r=play_runtime::state;
     // Inject an already reached graphics milestone, then exercise a terminal
     // guest stop (fatal dialog). Progress must never mask that failure.
@@ -730,6 +783,18 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         // greps the log for the seed line Play must emit.
         auto api=play_runtime::named(L"steam_api64.dll");
         ok=ok&&r->finished&&r->success&&r->code==42&&api&&api->mapped&&api->initialized;
+    }
+    else if(mode=="lobbies") {
+        // The fixture exits 42 only when the provider kept every call made before
+        // ManualDispatch_Init, the launcher answered every one after it (with
+        // handles the provider never saw) and the provider's own callbacks still
+        // arrived once each. LeaveLobby has no result to wait on, so give the
+        // executor's thread a moment to reach the CM before counting.
+        for(int i=0;i<150&&lobbyLeaves.load()<1;++i)Sleep(20);
+        printf("PLAY-LOBBIES creates=%d lists=%d joins=%d leaves=%d\n",lobbyCreates.load(),lobbyLists.load(),lobbyJoins.load(),lobbyLeaves.load());fflush(stdout);
+        auto api=play_runtime::named(L"steam_api64.dll");
+        ok=ok&&r->finished&&r->success&&r->code==42&&api&&api->mapped&&api->initialized&&
+            lobbyCreates==1&&lobbyLists==1&&lobbyJoins==1&&lobbyLeaves==1;
     }
     else if(mode=="discord-sdk") {
         // Both Discord SDK flavours returned the answer they return with no
