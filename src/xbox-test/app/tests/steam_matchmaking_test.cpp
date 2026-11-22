@@ -950,18 +950,23 @@ void key_values() {
     KV in{{"a", "1"}, {"b", ""}, {"key with space", "value=with;chars"}};
     CHECK(steam_lobbies::kv_decode(steam_lobbies::kv_encode(in)) == in);
     CHECK(steam_lobbies::kv_decode(steam_lobbies::kv_encode({})).empty() && steam_lobbies::kv_decode("").empty());
-    CHECK(steam_lobbies::kv_encode({{"k", "v"}}) == std::string("\x01k\0v\0\x08", 6));
-    // A sub-key header around the pairs, and values of other types, read as text.
+    CHECK(steam_lobbies::kv_encode({{"k", "v"}}) == std::string("\x00\x00\x01k\0v\0\x08\x08", 9));
+    // A sub-key header around the pairs, and values of other types, read as text (or skip cleanly).
     std::string wrapped("\x00" "root\0", 6);
     wrapped += std::string("\x01s\0txt\0", 7);
     int32_t i32 = -5; wrapped += std::string("\x02i\0", 3) + std::string(reinterpret_cast<char*>(&i32), 4);
     uint64_t u64 = 1ull << 40; wrapped += std::string("\x07u\0", 3) + std::string(reinterpret_cast<char*>(&u64), 8);
+    int64_t i64 = -(1ll << 40); wrapped += std::string("\x0a" "s64\0", 5) + std::string(reinterpret_cast<char*>(&i64), 8);
+    wrapped += std::string("\x05w\0" "A\0B\0\0\0", 9);   // UTF-16LE "AB\0": skipped without losing alignment
+    wrapped += std::string("\x01" "after\0ok\0", 10);
     wrapped += std::string("\x08\x08", 2);
-    CHECK(steam_lobbies::kv_decode(wrapped) == (KV{{"s", "txt"}, {"i", "-5"}, {"u", "1099511627776"}}));
+    CHECK(steam_lobbies::kv_decode(wrapped) == (KV{{"s", "txt"}, {"i", "-5"}, {"u", "1099511627776"}, {"s64", "-1099511627776"}, {"after", "ok"}}));
     // Truncated or hostile blobs stop cleanly, keeping what was whole.
     CHECK(steam_lobbies::kv_decode(std::string("\x01k\0v", 4)).empty());
     CHECK(steam_lobbies::kv_decode(std::string("\x01k\0v\0\x01z", 7)) == (KV{{"k", "v"}}));
     CHECK(steam_lobbies::kv_decode(std::string("\x02n\0\x01\x02", 5)).empty());
+    CHECK(steam_lobbies::kv_decode(std::string("\x05w\0" "A\0B", 6)).empty());
+    CHECK(steam_lobbies::kv_decode(std::string("\x0a" "n\0\x01\x02\x03\x04", 7)).empty());
     for (unsigned seed = 0; seed < 2000; ++seed) {
         std::string junk; unsigned x = seed * 2654435761u + 1;
         for (int n = 0; n < 40; ++n) { x = x * 1664525u + 1013904223u; junk += char(x >> 24); }
@@ -987,6 +992,15 @@ void tap_replacement() {
         hub.set(third.svc); CHECK(third.svc->active());
         // A failed pipe lookup (0) is not remembered over a good one.
         CHECK(hub.pipe([]() -> int32_t { return 0; }) == 0 && third.svc->active());
+        // Per-launch reset forgets ManualDispatch_Init and pipe: a subsequent non-ManualDispatch
+        // launch starts inactive and passes matchmaking calls through to the provider.
+        hub.reset();
+        Rig next_launch;
+        hub.set(next_launch.svc);
+        CHECK(!next_launch.svc->active());
+        const uint64_t passthrough = hub.create_lobby(p_create, nullptr, 2, 4);
+        CHECK(passthrough == 0x501 && P.create == 1);
+        CHECK(!hub.on_push(steam_lobbies::LobbyData, {}));
     }
     {   // Rapid replacement while the game holds a launcher message: the buffer survives until it is freed.
         Rig rig(false);

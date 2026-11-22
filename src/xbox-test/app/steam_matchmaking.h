@@ -1029,6 +1029,23 @@ public:
             if (game_pipe > 0) service->splice().set_pipe(game_pipe);
         }
     }
+    // Per-launch reset: closes and clears any installed service (retiring it in
+    // case a game still holds a message buffer) and forgets the previous launch's
+    // ManualDispatch_Init and HSteamPipe observations so the next launch starts
+    // inactive until that game calls ManualDispatch.
+    void reset() {
+        std::vector<std::shared_ptr<Service>> dropped;
+        std::shared_ptr<Service> old;
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            old = std::move(current_);
+            init_seen_ = false;
+            pipe_ = 0;
+            if (old) retired_.push_back(old);
+            while (retired_.size() > MaxRetired) { dropped.push_back(std::move(retired_.front())); retired_.pop_front(); }
+        }
+        if (old) old->close();
+    }
     std::shared_ptr<Service> get() const { std::lock_guard<std::mutex> lock(m_); return current_; }
 
     void init(InitFn real) {

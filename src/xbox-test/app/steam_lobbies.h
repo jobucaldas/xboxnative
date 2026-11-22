@@ -357,11 +357,11 @@ inline int32_t parse_status(const std::string& body, int32_t headerEresult) {
 
 // ---- lobby / member metadata
 // The CM carries lobby and member data as a binary KeyValues blob (Valve's
-// KeyValues::WriteAsBinary shape): `01 key\0 value\0` per string pair, closed
-// by `08`. Decoding is tolerant of what the CM may wrap or add: a leading
-// sub-key header (`00 name\0`), int32 / uint64 / float values (read as their
-// decimal text), nested sub-keys (flattened away) and a missing terminator.
-// Encoding writes the plain form above. Keys are kept sorted, so
+// KeyValues::WriteAsBinary shape): a root sub-key header (`00 \0`), then
+// `01 key\0 value\0` per string pair, closed by `08 08`. Decoding also accepts
+// unwrapped pairs, int32 / int64 / uint64 / float values (read as their decimal
+// text), wide strings (skipped without losing place), nested sub-keys
+// (flattened away) and a missing terminator. Keys are kept sorted, so
 // GetLobbyDataByIndex is stable.
 inline std::map<std::string, std::string> kv_decode(const std::string& blob) {
     std::map<std::string, std::string> out;
@@ -386,9 +386,21 @@ inline std::map<std::string, std::string> kv_decode(const std::string& blob) {
         } else if (type == 7) {
             if (n - i < 8) break;
             uint64_t v; memcpy(&v, blob.data() + i, 8); i += 8; value = std::to_string(v);
+        } else if (type == 10) {
+            if (n - i < 8) break;
+            int64_t v; memcpy(&v, blob.data() + i, 8); i += 8; value = std::to_string(v);
         } else if (type == 3) {
             if (n - i < 4) break;
             float v; memcpy(&v, blob.data() + i, 4); i += 4; value = std::to_string(v);
+        } else if (type == 5) {
+            // Wide string (UTF-16LE, NUL-terminated): advance past it cleanly.
+            bool closed = false;
+            while (n - i >= 2) {
+                uint16_t ch; memcpy(&ch, blob.data() + i, 2); i += 2;
+                if (ch == 0) { closed = true; break; }
+            }
+            if (!closed) break;
+            continue;
         } else if (!skip(4)) break;                        // pointer / colour: nothing a game reads as text
         else continue;
         out[key] = value;
@@ -397,10 +409,11 @@ inline std::map<std::string, std::string> kv_decode(const std::string& blob) {
 }
 inline std::string kv_encode(const std::map<std::string, std::string>& kv) {
     std::string out;
+    out += char(0); out += char(0);                        // unnamed root sub-key header
     for (auto& [key, value] : kv) {
         out += char(1); out += key; out += char(0); out += value; out += char(0);
     }
-    out += char(8);
+    out += char(8); out += char(8);                        // end root sub-key, end stream
     return out;
 }
 

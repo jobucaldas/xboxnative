@@ -41,7 +41,7 @@ count "lobby tap started once, inside the ownership-gated block" 'try{matchmakin
 count "lobby tap cleared in the final sync" 'try{matchmaking_end();}catch(...){}' 1
 has "lobby pushes are routed to the tap by the shared CM push handler" 'play_runtime::matchmaking_push(m.emsg,m.body);'
 has "lobby chat and game-server sets are sent without waiting for an answer" 'emsg==steam_lobbies::SendLobbyChatMsg||emsg==steam_lobbies::SetLobbyGameServer'
-lacks "lobby tap installed outside the ownership gate" 'set_matchmaking_tap({std::make_shared<steam_matchmaking::Service>(std::move(config))});}'
+grep -Fq 'matchmakingHub.reset();' "$here/../host/play_runtime.h" || { echo "launch-bugbot-guards: missing: reset_launch_config clears matchmakingHub per launch" >&2; fail=1; }
 
 if [[ $fail -ne 0 ]]; then exit 1; fi
 echo "launch-bugbot-guards: PASS ($src)"

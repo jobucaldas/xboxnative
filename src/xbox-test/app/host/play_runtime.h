@@ -2810,6 +2810,7 @@ static void reset_launch_config() {
     set_rich_presence_tap({});
     set_leaderboard_tap({});
     set_leaderboard_provider(nullptr);   // the image may be unloaded with the launch
+    matchmakingHub.reset();              // drop tap and per-launch ManualDispatch/pipe observations
     clearVulkanDriverFiles();
     // The donor bridge points at the probed donor set, which the next launch
     // re-probes and re-wires (launch.h/selftest.h); a stale bridge into a
