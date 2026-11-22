@@ -28,6 +28,12 @@ count "managed route pins FNA3D to D3D11 via RAII" 'fna_driver::Scope fnaDriver;
 count "SEH wrapper releases the FNA3D pin after __except" 'fna_driver::release_all();' 1
 has "managed route logs the effective FNA3D driver" 'fna3d=%s'
 has "launch.h includes the FNA driver helper" '#include "host/fna_driver.h"'
+lacks "PE32 Mesa loaded by the system loader (binds system user32/gdi32, not the record DCs)" 'LoadPackagedLibrary(L"runtime\\opengl32.dll"'
+lacks "PE32 GL proc lookup through a system-loaded Mesa handle" 'GetProcAddress(mesa,'
+has "PE32 Mesa mapped through Play's loader" 'play_runtime::map_opengl_runtime(package,lp_sink)'
+count "PE32 GL proc lookup maps Mesa before resolving" 'x86_mesa_map();' 1
+has "PE32 wglGetProcAddress fallback resolves through Play's loader" 'play_runtime::openglExport("wglGetProcAddress")'
+grep -Fq 'static HMODULE map_opengl_runtime(' "$here/../host/play_runtime.h" || { echo "launch-bugbot-guards: missing: play_runtime maps opengl32 for the PE32 route" >&2; fail=1; }
 
 if [[ $fail -ne 0 ]]; then exit 1; fi
 echo "launch-bugbot-guards: PASS ($src)"

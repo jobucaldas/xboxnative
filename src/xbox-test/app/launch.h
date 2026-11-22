@@ -1189,6 +1189,23 @@ static void dump_thread_stacks() {
     }
     lp_sink("STACKS end");
 }
+// Mesa for the guest's GL calls is mapped through Play's loader on the first call, as on x64, so its
+// user32/gdi32 imports bind to the u32c record shims; LoadPackagedLibrary would bind the system ones,
+// where WindowFromDC cannot see the guest's record DCs. Lazy: a PE32 guest that never uses GL leaves
+// the loader free. Once mapped it stays for the process, like the managed runtime.
+static bool x86_mesa_map() {
+    static const bool ok=[]{
+        wchar_t self[2048];DWORD n=GetModuleFileNameW(nullptr,self,2048);
+        std::wstring package=n&&n<2048?std::wstring(self,n):std::wstring();
+        auto slash=package.find_last_of(L"\\/");
+        if(slash==std::wstring::npos){lp_sink("x86 GL: launcher path unavailable; Mesa not mapped");return false;}
+        package.resize(slash);
+        const bool mapped=play_runtime::map_opengl_runtime(package,lp_sink)!=nullptr;
+        lp_sink(mapped?"x86 GL: Mesa mapped through Play's loader":"x86 GL: Play loader could not map runtime\\opengl32.dll (or another guest already owns it); GL calls report gaps");
+        return mapped;
+    }();
+    return ok;
+}
 // A 32-bit (PE32) guest: the in-process x86 interpreter (host/x86) runs the
 // executable with the guest OS surface serving its imports. This is a separate
 // path from the 64-bit loader on purpose: the guest never shares the launcher's
@@ -1332,7 +1349,6 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         };
         host.random_bytes=[](uint8_t* data,uint32_t size) { return BCryptGenRandom(nullptr,data,size,BCRYPT_USE_SYSTEM_PREFERRED_RNG)>=0; };
         static HMODULE records=LoadPackagedLibrary(L"uwph-u32c.dll",0);
-        static HMODULE mesa=LoadPackagedLibrary(L"runtime\\opengl32.dll",0);
         static HMODULE d3d9=LoadPackagedLibrary(L"runtime\\d3d9.dll",0);
         using GetMetrics=int(WINAPI*)(int);
         auto get_metrics=records?reinterpret_cast<GetMetrics>(GetProcAddress(records,"GetSystemMetrics")):nullptr;
@@ -1467,8 +1483,9 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             else if(q.name=="DefWindowProcA"||q.name=="DefWindowProcW"){using Fn=LRESULT(WINAPI*)(HWND,UINT,WPARAM,LPARAM);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],UINT(q.args[1]),WPARAM(q.args[2]),LPARAM(q.args[3])));}
         };
         auto proc=[](const char* name)->uintptr_t {
+            x86_mesa_map();
             uintptr_t p=play_runtime::openglExport(name);
-            if(!p&&mesa){p=reinterpret_cast<uintptr_t>(GetProcAddress(mesa,name));if(!p){using GetProc=PROC(WINAPI*)(LPCSTR);auto get=reinterpret_cast<GetProc>(GetProcAddress(mesa,"wglGetProcAddress"));if(get)p=reinterpret_cast<uintptr_t>(get(name));}}
+            if(!p){using GetProc=PROC(WINAPI*)(LPCSTR);auto get=reinterpret_cast<GetProc>(play_runtime::openglExport("wglGetProcAddress"));if(get)p=reinterpret_cast<uintptr_t>(get(name));}
             if(p) SetLastError(ERROR_SUCCESS); // a failed GetProcAddress before the wgl fallback must not leak into the guest
             return p;
         };

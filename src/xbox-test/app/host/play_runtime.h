@@ -2359,7 +2359,7 @@ static std::vector<std::wstring> command_line_tokens(const std::wstring& input) 
 // Managed runtimes are host dependencies, not game executables, but they still
 // use the same PE mapper and import resolver as game DLLs. Keep their mapped
 // state alive for the process because Mono may retain native callbacks.
-static HMODULE map_managed_runtime(const std::wstring& packageRoot,const std::wstring& runtimePath,const std::wstring& exePath,const std::wstring& args,const std::wstring& cwd,wxl::Log log) {
+static HMODULE map_managed_runtime(const std::wstring& packageRoot,const std::wstring& runtimePath,const std::wstring& exePath,const std::wstring& args,const std::wstring& cwd,wxl::Log log,const char* asKey="mono-2.0-sgen.dll") {
     if(state) return nullptr;
     clearVulkanDriverFiles();
     auto exeSlash=exePath.find_last_of(L"\\/");
@@ -2383,12 +2383,21 @@ static HMODULE map_managed_runtime(const std::wstring& packageRoot,const std::ws
     prepare_dxil();
     auto slash=runtimePath.find_last_of(L"\\/");
     if(slash!=std::wstring::npos) alteredLoadDir()=runtimePath.substr(0,slash);
-    auto module=map(runtimePath,"mono-2.0-sgen.dll");
+    auto module=map(runtimePath,asKey);
     alteredLoadDir().clear();
     if(!module || !initializePending()) {state->result=state->snapshot();state->finished=true;return nullptr;}
     for(const auto& line:mlp::launch_gap.report(module->key,"x64").lines) if(log) log(line.c_str());
     module->pinned=true;
     return (HMODULE)module->image.base;
+}
+// A PE32 guest's GL host maps packaged Mesa here, as the x64 route does, so Mesa's
+// user32/gdi32 imports bind to Play's record shims and WindowFromDC sees the DCs the
+// guest got from GetDC. The process directory is kept: the guest runs from it.
+static HMODULE map_opengl_runtime(const std::wstring& packageRoot,wxl::Log log) {
+    wchar_t cwd[32768];DWORD n=GetCurrentDirectoryW(32768,cwd);
+    if(!n||n>=32768) return nullptr;
+    const auto path=packageRoot+L"\\runtime\\opengl32.dll";
+    return map_managed_runtime(packageRoot,path,path,L"",std::wstring(cwd,n),log,"opengl32.dll");
 }
 static FARPROC managed_export(HMODULE module,const char* name) {
     if(!state||!module||!name)return nullptr;
