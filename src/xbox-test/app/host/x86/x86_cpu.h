@@ -77,7 +77,10 @@ struct Cpu {
     // so this process cache is not concurrently mutated or executed by guest threads.
     std::unordered_map<uint32_t, dbt::RuntimeBlock> dbt_cache;
     std::array<dbt::RuntimeBlock*, 4> dbt_inline_cache{};
-    std::unordered_map<uint32_t, std::string> dbt_unsupported;
+    // A failed translation depends on the guest pages it inspected (code window and
+    // absolute operand pages); the entry is stale once any of their generations moves.
+    struct DbtUnsupported { std::string key; std::vector<std::pair<uint32_t, uint32_t>> pages; };
+    std::unordered_map<uint32_t, DbtUnsupported> dbt_unsupported;
     std::unordered_map<std::string, uint64_t> dbt_fallbacks;
     unsigned depth = 0;
     bool seh_dispatching = false;
@@ -124,8 +127,9 @@ struct Cpu {
                 if (page.first >= first && page.first <= last) { clear_dbt_cache(); return; }
         }
         for (auto it = dbt_unsupported.begin(); it != dbt_unsupported.end();) {
-            uint32_t page = it->first >> 12;
-            if (page >= first && page <= last) it = dbt_unsupported.erase(it); else ++it;
+            bool touched = false;
+            for (const auto& page : it->second.pages) touched |= page.first >= first && page.first <= last;
+            if (touched) it = dbt_unsupported.erase(it); else ++it;
         }
     }
     std::string dbt_fallback_key(uint32_t pc, const char* reason) const {
@@ -280,8 +284,14 @@ struct Cpu {
             if (dbt_enabled && eip != thunks.sentinel() && !thunks.at(eip)) {
                 auto unsupported_it = dbt_unsupported.find(eip);
                 if (unsupported_it != dbt_unsupported.end()) {
-                    if (state_live) sync_state();
-                    ++dbt_fallbacks[unsupported_it->second]; ++interpreted_blocks; step(); continue;
+                    bool stale = false;
+                    for (const auto& page : unsupported_it->second.pages)
+                        stale |= mem.page_generation(page.first << 12) != page.second;
+                    if (stale) dbt_unsupported.erase(unsupported_it);
+                    else {
+                        if (state_live) sync_state();
+                        ++dbt_fallbacks[unsupported_it->second.key]; ++interpreted_blocks; step(); continue;
+                    }
                 }
                 dbt::RuntimeBlock* block_ptr = chained && chained->guest_pc == eip ? chained : nullptr;
                 chained = nullptr;
@@ -339,9 +349,14 @@ struct Cpu {
                     }
                 }
                 if (!block_ptr) {
+                    std::vector<uint8_t> bytes;
+                    std::vector<std::pair<uint32_t, uint32_t>> memory_generations;
+                    auto note_generation = [&](uint32_t page) {
+                        if (std::find_if(memory_generations.begin(), memory_generations.end(),
+                                         [page](const auto& entry) { return entry.first == page; }) == memory_generations.end())
+                            memory_generations.emplace_back(page, mem.page_generation(page << 12));
+                    };
                     try {
-                        std::vector<uint8_t> bytes;
-                        std::vector<std::pair<uint32_t, uint32_t>> memory_generations;
                         std::vector<uint32_t> store_pages;
                         size_t pc = 0; uint8_t last_opcode = 0; bool interpreter_boundary = false, may_fault = false;
                         bool needs_prot = false, needs_generation = false;
@@ -358,6 +373,10 @@ struct Cpu {
                             if (memory && absolute_memory) may_fault = true;
                             if (memory && absolute_memory) {
                                 uint8_t need = memory_write ? PROT_W : PROT_R;
+                                // Record the operand pages first so a protection or mapping failure
+                                // is retried once their generation moves.
+                                for (uint64_t page = ea >> 12, stop = (std::min<uint64_t>(uint64_t(ea) + std::max<uint8_t>(memory_size, 1), Memory::ADDRESS_SPACE_SIZE) - 1) >> 12; page <= stop; ++page)
+                                    note_generation(uint32_t(page));
                                 if (!translatable_range(ea, memory_size, need))
                                     throw std::runtime_error(memory_write ? "DBT absolute store page is not writable" : "DBT absolute load page is not readable");
                                 uint64_t end = uint64_t(ea) + memory_size;
@@ -365,10 +384,6 @@ struct Cpu {
                                 for (uint32_t page = first;; ++page) {
                                     if (memory_write && holds_translated_code(page))
                                         throw std::runtime_error("DBT store targets translated code");
-                                    uint32_t generation = mem.page_generation(page << 12);
-                                    if (std::find_if(memory_generations.begin(), memory_generations.end(),
-                                                     [page](const auto& entry) { return entry.first == page; }) == memory_generations.end())
-                                        memory_generations.emplace_back(page, generation);
                                     if (memory_write && std::find(store_pages.begin(), store_pages.end(), page) == store_pages.end())
                                         store_pages.push_back(page);
                                     if (page == last) break;
@@ -386,7 +401,7 @@ struct Cpu {
                         block.guest_pc = eip; block.guest_length = uint32_t(pc); block.exit_opcode = last_opcode;
                         block.interpreter_boundary = interpreter_boundary; block.xmm_mask = dbt::runtime_xmm_mask(bytes); block.uses_xmm = block.xmm_mask != 0; block.guest_bytes = bytes;
                         block.may_fault = may_fault;
-                        block.memory_generations = std::move(memory_generations);
+                        block.memory_generations = memory_generations;
                         block.store_pages = std::move(store_pages);
                         uint32_t first_page = eip >> 12, last_page = (eip + uint32_t(pc) - 1) >> 12;
                         for (uint32_t page = first_page;; ++page) {
@@ -400,7 +415,11 @@ struct Cpu {
                         block_ptr = &dbt_cache.emplace(eip, std::move(block)).first->second;
                     } catch (const std::exception& ex) {
                         std::string key = dbt_fallback_key(eip, ex.what());
-                        dbt_unsupported.emplace(eip, key);
+                        // Cover every byte the decoder could have read (x86 instructions are <= 15 bytes).
+                        const uint64_t reach = std::max<uint64_t>(bytes.size() + 1, 16);
+                        for (uint64_t page = eip >> 12, stop = (std::min<uint64_t>(uint64_t(eip) + reach, Memory::ADDRESS_SPACE_SIZE) - 1) >> 12; page <= stop; ++page)
+                            note_generation(uint32_t(page));
+                        dbt_unsupported.emplace(eip, DbtUnsupported{key, std::move(memory_generations)});
                         if (state_live) sync_state();
                         ++dbt_fallbacks[key]; ++interpreted_blocks; step(); continue;
                     }

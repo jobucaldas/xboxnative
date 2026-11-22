@@ -933,6 +933,90 @@ static void fault_reports_write_access() {
     std::printf("X86-DBT PASS: unmapped store fault reports write access, load reports read\n");
 }
 
+// Rewrites guest code the way a loader or self-modifying guest does: only page
+// generations move, nothing calls invalidate_dbt_range.
+static void patch_code(RuntimeMachine& m, uint32_t addr, const std::vector<uint8_t>& bytes) {
+    const uint32_t page = addr & ~(PAGE - 1);
+    m.memory.protect(page, PAGE, PROT_R | PROT_W);
+    m.memory.write_bytes(addr, bytes.data(), uint32_t(bytes.size()));
+    m.memory.protect(page, PAGE, PROT_R | PROT_X);
+}
+static void run_from(RuntimeMachine& m, uint32_t eip, uint32_t stop) {
+    m.cpu.eip = eip; m.cpu.eflags = 2; m.cpu.run(stop);
+}
+
+// cld is interpreter-only; overwriting it must retire the cached fallback.
+static void unsupported_entry_retires_on_code_overwrite() {
+    RuntimeMachine m;
+    m.cpu.dbt_enabled = true;
+    m.load({0xFC, 0xB8, 5, 0, 0, 0, 0xF4});
+    run_from(m, CODE, CODE + 6);
+    if (m.cpu.reg[EAX] != 5 || !m.cpu.dbt_unsupported.count(CODE)) throw std::runtime_error("cld was not cached as unsupported");
+    patch_code(m, CODE, {0xB8, 7, 0, 0, 0, 0xF4});
+    const uint64_t before = m.cpu.translated_blocks;
+    run_from(m, CODE, CODE + 5);
+    if (m.cpu.reg[EAX] != 7 || m.cpu.translated_blocks != before + 1 || m.cpu.dbt_unsupported.count(CODE))
+        throw std::runtime_error("overwritten unsupported instruction stayed on the interpreter");
+    std::printf("X86-DBT PASS: overwriting an unsupported instruction retranslates it\n");
+}
+
+// A 66-prefixed instruction whose opcode is on the next page depends on that page.
+static void unsupported_entry_tracks_straddled_page() {
+    RuntimeMachine m;
+    m.memory.map(CODE + PAGE, PAGE, PROT_R | PROT_W);
+    m.cpu.dbt_enabled = true;
+    const uint32_t at = CODE + PAGE - 1;
+    patch_code(m, at, {0x66}); patch_code(m, CODE + PAGE, {0x90, 0xF4});
+    run_from(m, at, CODE + PAGE + 1);
+    if (!m.cpu.dbt_unsupported.count(at)) throw std::runtime_error("straddling 66 90 was not cached as unsupported");
+    m.cpu.invalidate_dbt_range(CODE + PAGE, 1);
+    if (m.cpu.dbt_unsupported.count(at)) throw std::runtime_error("invalidating the second page kept the entry");
+    run_from(m, at, CODE + PAGE + 1);
+    if (!m.cpu.dbt_unsupported.count(at)) throw std::runtime_error("straddling 66 90 was not re-cached");
+    patch_code(m, CODE + PAGE, {0x0F, 0x6E, 0xC0, 0xF4});
+    const uint64_t before = m.cpu.translated_blocks;
+    m.cpu.reg[EAX] = 0x1234;
+    run_from(m, at, CODE + PAGE + 3);
+    if (m.cpu.translated_blocks != before + 1 || m.cpu.xmm.r[0][0] != 0x1234 || m.cpu.dbt_unsupported.count(at))
+        throw std::runtime_error("changing the second page did not retranslate the straddling instruction");
+    std::printf("X86-DBT PASS: unsupported entry follows a straddled second page\n");
+}
+
+// A stable unsupported opcode must keep hitting the cache instead of retrying translation.
+static void unsupported_loop_keeps_cache_hit() {
+    RuntimeMachine m;
+    m.cpu.dbt_enabled = true;
+    m.load({0xFC, 0xFF, 0xC9, 0x75, 0xFB, 0xF4});  // loop: cld; dec ecx; jnz loop
+    m.cpu.reg[ECX] = 10;
+    run_from(m, CODE, CODE + 5);
+    if (m.cpu.dbt_unsupported.size() != 1 || !m.cpu.dbt_unsupported.count(CODE)) throw std::runtime_error("cld loop was not cached as unsupported");
+    m.cpu.dbt_unsupported[CODE].key = "cached";
+    m.cpu.reg[ECX] = 10;
+    run_from(m, CODE, CODE + 5);
+    if (m.cpu.dbt_fallbacks["cached"] != 10 || m.cpu.dbt_unsupported[CODE].key != "cached")
+        throw std::runtime_error("unchanged unsupported entry was retranslated");
+    std::printf("X86-DBT PASS: unsupported loop keeps hitting the fallback cache\n");
+}
+
+// The interpreter's store makes a copy-on-write page writable and bumps its generation,
+// so an absolute store the DBT first refused must translate afterwards.
+static void transient_store_refusal_is_retried() {
+    RuntimeMachine m;
+    m.cpu.dbt_enabled = true;
+    const uint32_t target = DATA + 0x40;
+    m.memory.protect(DATA, PAGE, PROT_R | PROT_COW);
+    m.load({0x89, 0x05, uint8_t(target), uint8_t(target >> 8), uint8_t(target >> 16), uint8_t(target >> 24), 0xF4});
+    m.cpu.reg[EAX] = 0x1234;
+    run_from(m, CODE, CODE + 6);
+    if (m.cpu.translated_blocks != 0 || !m.cpu.dbt_unsupported.count(CODE) || m.memory.r32(target) != 0x1234)
+        throw std::runtime_error("copy-on-write store was not interpreted and cached");
+    m.cpu.reg[EAX] = 0x5678;
+    run_from(m, CODE, CODE + 6);
+    if (m.cpu.translated_blocks != 1 || m.cpu.dbt_unsupported.count(CODE) || m.memory.r32(target) != 0x5678)
+        throw std::runtime_error("store stayed blacklisted after the page became writable");
+    std::printf("X86-DBT PASS: transient absolute-store refusal is retried after the page changes\n");
+}
+
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::strcmp(argv[1], "--bench") == 0) return benchmark();
@@ -955,6 +1039,10 @@ int main(int argc, char** argv) {
         byte_register_unary_differential();
         faulted_sse_convert_restores_host_mxcsr();
         fault_reports_write_access();
+        unsupported_entry_retires_on_code_overwrite();
+        unsupported_entry_tracks_straddled_page();
+        unsupported_loop_keeps_cache_hit();
+        transient_store_refusal_is_retried();
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "X86-DBT FAIL: %s\n", e.what()); return 1;
