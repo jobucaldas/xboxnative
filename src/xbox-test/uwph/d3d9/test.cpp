@@ -88,6 +88,19 @@ static HMODULE loadShim() {
     for(unsigned i=0;i<sizeof name/sizeof name[0];++i)path[n+i]=name[i];
     return LoadLibraryExW(path,nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
 }
+// A query's answer is not instant on a real host: poll with FLUSH until it
+// leaves S_FALSE, bounded so a query that never completes fails the test
+// instead of hanging it.
+static HRESULT drain(IDirect3DQuery9* query,void* data,DWORD size) {
+    HRESULT hr=S_FALSE;
+    for(unsigned i=0;i<3000&&hr==S_FALSE;++i) {
+        hr=query->GetData(data,size,D3DGETDATA_FLUSH);
+        if(hr==S_FALSE)Sleep(1);
+    }
+    return hr;
+}
+static ULONG refsOf(IUnknown* object) { object->AddRef();return object->Release(); }
+
 extern "C" DWORD WINAPI d3d9_test_entry() {
     HMODULE module=loadShim();
     if(!module) {
@@ -915,8 +928,252 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
         if(target)target->Release();
     }
 
+    // Queries. D3D9 lets a game ask first whether a query type exists: a null
+    // result pointer is that probe and must create nothing.
+    const ULONG deviceRefs=refsOf(device);
+    {
+        const D3DQUERYTYPE supported[]={D3DQUERYTYPE_EVENT,D3DQUERYTYPE_OCCLUSION,D3DQUERYTYPE_TIMESTAMP,
+            D3DQUERYTYPE_TIMESTAMPDISJOINT,D3DQUERYTYPE_TIMESTAMPFREQ};
+        for(D3DQUERYTYPE type:supported) {
+            HRESULT hr=device->CreateQuery(type,nullptr);
+            if(type==D3DQUERYTYPE_EVENT||type==D3DQUERYTYPE_OCCLUSION)CHECK_HR_IS(hr,D3D_OK);
+            else {
+                // Timestamps need host support; a host that refuses them must say
+                // so with NOTAVAILABLE, never with a crash or another code.
+                if(hr!=D3D_OK)outHex("INFO host refuses timestamp query type=",type);
+                CHECK(hr==D3D_OK||hr==D3DERR_NOTAVAILABLE);
+            }
+        }
+        CHECK(refsOf(device)==deviceRefs);   // the probes created nothing
+        const D3DQUERYTYPE unsupported[]={D3DQUERYTYPE_VCACHE,D3DQUERYTYPE_RESOURCEMANAGER,
+            D3DQUERYTYPE_VERTEXSTATS,D3DQUERYTYPE_PIPELINETIMINGS,D3DQUERYTYPE_BANDWIDTHTIMINGS,
+            D3DQUERYTYPE(7),D3DQUERYTYPE(99)};
+        for(D3DQUERYTYPE type:unsupported) {
+            CHECK_HR_IS(device->CreateQuery(type,nullptr),D3DERR_NOTAVAILABLE);
+            IDirect3DQuery9* none=reinterpret_cast<IDirect3DQuery9*>(1);
+            CHECK_HR_IS(device->CreateQuery(type,&none),D3DERR_NOTAVAILABLE);
+            CHECK(none==nullptr);
+        }
+    }
+
+    // EVENT: signalled once the GPU has reached the END, and D3D9 calls an event
+    // that was never issued signalled too.
+    {
+        IDirect3DQuery9* event=nullptr;
+        CHECK_HR(device->CreateQuery(D3DQUERYTYPE_EVENT,&event));
+        CHECK(event!=nullptr);
+        if(event) {
+            CHECK(event->GetType()==D3DQUERYTYPE_EVENT);
+            CHECK(event->GetDataSize()==sizeof(BOOL));
+            CHECK(refsOf(device)==deviceRefs+1);   // the query holds its device
+            IDirect3DDevice9* queryDevice=nullptr;
+            CHECK_HR(event->GetDevice(&queryDevice));
+            CHECK(queryDevice==static_cast<IDirect3DDevice9*>(device));
+            CHECK(refsOf(device)==deviceRefs+2);   // GetDevice adds its own
+            if(queryDevice)queryDevice->Release();
+            CHECK_HR_IS(event->GetDevice(nullptr),D3DERR_INVALIDCALL);
+            void* unknown=nullptr;
+            CHECK_HR(event->QueryInterface(__uuidof(IDirect3DQuery9),&unknown));
+            if(unknown)static_cast<IUnknown*>(unknown)->Release();
+            CHECK_HR_IS(event->QueryInterface(__uuidof(IDirect3DDevice9),&unknown),E_NOINTERFACE);
+
+            BOOL signalled=FALSE;
+            CHECK_HR_IS(event->GetData(&signalled,sizeof signalled,0),S_OK);
+            CHECK(signalled==TRUE);
+            // Only an END exists for an event; the other flag combinations do not.
+            CHECK_HR_IS(event->Issue(D3DISSUE_BEGIN),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(event->Issue(0),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(event->Issue(D3DISSUE_BEGIN|D3DISSUE_END),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(event->Issue(4),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(event->Issue(0x80000000u),D3DERR_INVALIDCALL);
+            CHECK_HR(event->Issue(D3DISSUE_END));
+            signalled=FALSE;
+            CHECK_HR_IS(drain(event,&signalled,sizeof signalled),S_OK);
+            CHECK(signalled==TRUE);
+            // A readiness probe takes no buffer, and a size without a buffer is refused.
+            CHECK_HR_IS(event->GetData(nullptr,0,D3DGETDATA_FLUSH),S_OK);
+            CHECK_HR_IS(event->GetData(&signalled,0,D3DGETDATA_FLUSH),S_OK);
+            CHECK_HR_IS(event->GetData(nullptr,sizeof(BOOL),0),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(event->GetData(&signalled,sizeof signalled,2),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(event->GetData(&signalled,sizeof signalled,0x80),D3DERR_INVALIDCALL);
+            // The copy is capped at both the caller's size and the data's size.
+            unsigned char bytes[8];
+            for(unsigned i=0;i<8;++i)bytes[i]=0xaa;
+            CHECK_HR_IS(event->GetData(bytes,2,D3DGETDATA_FLUSH),S_OK);
+            CHECK(bytes[0]==1&&bytes[1]==0&&bytes[2]==0xaa);
+            for(unsigned i=0;i<8;++i)bytes[i]=0xaa;
+            CHECK_HR_IS(event->GetData(bytes,8,D3DGETDATA_FLUSH),S_OK);
+            CHECK(bytes[0]==1&&bytes[3]==0&&bytes[4]==0xaa&&bytes[7]==0xaa);
+            event->Release();
+            CHECK(refsOf(device)==deviceRefs);
+        }
+    }
+
+    // OCCLUSION counts the pixels that pass between BEGIN and END: a visible
+    // triangle counts, and so does nothing when the draw misses the target, so a
+    // query that always answers one value cannot pass both.
+    {
+        IDirect3DSurface9* target=nullptr;
+        CHECK_HR(device->CreateRenderTarget(64,64,D3DFMT_X8R8G8B8,D3DMULTISAMPLE_NONE,0,FALSE,
+            &target,nullptr));
+        IDirect3DQuery9* occlusion=nullptr;
+        CHECK_HR(device->CreateQuery(D3DQUERYTYPE_OCCLUSION,&occlusion));
+        if(target&&occlusion) {
+            CHECK(occlusion->GetType()==D3DQUERYTYPE_OCCLUSION);
+            CHECK(occlusion->GetDataSize()==sizeof(DWORD));
+            struct Vertex { float x,y,z,w; DWORD colour; };
+            const Vertex visible[3]={
+                { 8.0f, 8.0f,0.0f,1.0f,0xffff0000},
+                {56.0f, 8.0f,0.0f,1.0f,0xffff0000},
+                {32.0f,56.0f,0.0f,1.0f,0xffff0000},
+            };
+            Vertex outside[3];
+            for(unsigned i=0;i<3;++i){outside[i]=visible[i];outside[i].x+=200.0f;}   // off the 64x64 target
+            CHECK_HR(device->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE));
+            CHECK_HR(device->SetRenderState(D3DRS_LIGHTING,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));
+            CHECK_HR(device->SetRenderState(D3DRS_ZENABLE,FALSE));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetRenderTarget(0,target));
+            D3DVIEWPORT9 full{0,0,64,64,0.0f,1.0f};
+            CHECK_HR(device->SetViewport(&full));
+            CHECK_HR(device->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1.0f,0));
+
+            DWORD pixels=0xdeadbeef;
+            CHECK_HR(device->BeginScene());
+            CHECK_HR(occlusion->Issue(D3DISSUE_BEGIN));
+            // An open interval has no answer yet, and never hangs the caller.
+            CHECK_HR_IS(occlusion->GetData(&pixels,sizeof pixels,0),S_FALSE);
+            CHECK_HR(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST,1,visible,sizeof(Vertex)));
+            CHECK_HR(occlusion->Issue(D3DISSUE_END));
+            CHECK_HR(device->EndScene());
+            CHECK_HR_IS(drain(occlusion,&pixels,sizeof pixels),S_OK);
+            outNum("INFO occlusion visible pixels=",pixels);
+            // The triangle covers about 1152 pixels.
+            CHECK(pixels>=900&&pixels<=1400);
+
+            // The same query object restarts on a new BEGIN.
+            pixels=0xdeadbeef;
+            CHECK_HR(device->BeginScene());
+            CHECK_HR(occlusion->Issue(D3DISSUE_BEGIN));
+            CHECK_HR(device->DrawPrimitiveUP(D3DPT_TRIANGLELIST,1,outside,sizeof(Vertex)));
+            CHECK_HR(occlusion->Issue(D3DISSUE_END));
+            CHECK_HR(device->EndScene());
+            CHECK_HR_IS(drain(occlusion,&pixels,sizeof pixels),S_OK);
+            CHECK(pixels==0);
+
+            // A bracket with no draw, and an END with no BEGIN, both count nothing.
+            pixels=0xdeadbeef;
+            CHECK_HR(occlusion->Issue(D3DISSUE_BEGIN));
+            CHECK_HR(occlusion->Issue(D3DISSUE_END));
+            CHECK_HR_IS(drain(occlusion,&pixels,sizeof pixels),S_OK);
+            CHECK(pixels==0);
+            pixels=0xdeadbeef;
+            CHECK_HR(occlusion->Issue(D3DISSUE_END));
+            CHECK_HR_IS(drain(occlusion,&pixels,sizeof pixels),S_OK);
+            CHECK(pixels==0);
+            // A second BEGIN before the END restarts the count rather than failing.
+            CHECK_HR(occlusion->Issue(D3DISSUE_BEGIN));
+            CHECK_HR(occlusion->Issue(D3DISSUE_BEGIN));
+            CHECK_HR(occlusion->Issue(D3DISSUE_END));
+            CHECK_HR_IS(drain(occlusion,&pixels,sizeof pixels),S_OK);
+            CHECK_HR_IS(occlusion->Issue(0),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(occlusion->GetData(&pixels,sizeof pixels,0x10),D3DERR_INVALIDCALL);
+            CHECK_HR(device->SetRenderTarget(0,backBuffer));
+        }
+        if(occlusion)occlusion->Release();
+        if(target)target->Release();
+    }
+
+    // TIMESTAMP, TIMESTAMPDISJOINT and TIMESTAMPFREQ. A host without timestamp
+    // support refuses the creation (reported above); everything else is asserted.
+    {
+        IDirect3DQuery9* stamp=nullptr;
+        IDirect3DQuery9* later=nullptr;
+        if(device->CreateQuery(D3DQUERYTYPE_TIMESTAMP,nullptr)==D3D_OK) {
+            CHECK_HR(device->CreateQuery(D3DQUERYTYPE_TIMESTAMP,&stamp));
+            CHECK_HR(device->CreateQuery(D3DQUERYTYPE_TIMESTAMP,&later));
+        }
+        if(stamp&&later) {
+            CHECK(stamp->GetType()==D3DQUERYTYPE_TIMESTAMP);
+            CHECK(stamp->GetDataSize()==sizeof(UINT64));
+            CHECK_HR_IS(stamp->Issue(D3DISSUE_BEGIN),D3DERR_INVALIDCALL);
+            UINT64 first=0,second=0;
+            CHECK_HR(stamp->Issue(D3DISSUE_END));
+            CHECK_HR_IS(drain(stamp,&first,sizeof first),S_OK);
+            CHECK_HR(later->Issue(D3DISSUE_END));
+            CHECK_HR_IS(drain(later,&second,sizeof second),S_OK);
+            outHex("INFO timestamps first=",first);outHex("INFO timestamps second=",second);
+            CHECK(first!=0&&second>=first);   // the clock only moves forward
+            // A buffer smaller than the data gets the leading bytes only.
+            unsigned char bytes[8];
+            for(unsigned i=0;i<8;++i)bytes[i]=0xaa;
+            CHECK_HR_IS(stamp->GetData(bytes,4,D3DGETDATA_FLUSH),S_OK);
+            CHECK(bytes[4]==0xaa&&bytes[7]==0xaa);
+        }
+        if(later)later->Release();
+        if(stamp)stamp->Release();
+
+        IDirect3DQuery9* disjoint=nullptr;
+        IDirect3DQuery9* frequency=nullptr;
+        if(device->CreateQuery(D3DQUERYTYPE_TIMESTAMPDISJOINT,nullptr)==D3D_OK)
+            CHECK_HR(device->CreateQuery(D3DQUERYTYPE_TIMESTAMPDISJOINT,&disjoint));
+        if(device->CreateQuery(D3DQUERYTYPE_TIMESTAMPFREQ,nullptr)==D3D_OK)
+            CHECK_HR(device->CreateQuery(D3DQUERYTYPE_TIMESTAMPFREQ,&frequency));
+        if(disjoint) {
+            CHECK(disjoint->GetType()==D3DQUERYTYPE_TIMESTAMPDISJOINT);
+            CHECK(disjoint->GetDataSize()==sizeof(BOOL));
+            BOOL broken=0xdeadbeef;
+            CHECK_HR(disjoint->Issue(D3DISSUE_BEGIN));
+            CHECK_HR(disjoint->Issue(D3DISSUE_END));
+            CHECK_HR_IS(drain(disjoint,&broken,sizeof broken),S_OK);
+            CHECK(broken==FALSE);   // nothing disturbed the clock; also proves it is not the frequency field
+            // END alone is an empty interval, as for the other bracketed type.
+            broken=0xdeadbeef;
+            CHECK_HR(disjoint->Issue(D3DISSUE_END));
+            CHECK_HR_IS(drain(disjoint,&broken,sizeof broken),S_OK);
+            CHECK(broken==FALSE);
+            CHECK_HR_IS(disjoint->Issue(0),D3DERR_INVALIDCALL);
+        }
+        if(frequency) {
+            CHECK(frequency->GetType()==D3DQUERYTYPE_TIMESTAMPFREQ);
+            CHECK(frequency->GetDataSize()==sizeof(UINT64));
+            // D3D9 has no BEGIN for it; the shim brackets the D3D11 query itself.
+            CHECK_HR_IS(frequency->Issue(D3DISSUE_BEGIN),D3DERR_INVALIDCALL);
+            UINT64 hertz=0;
+            CHECK_HR(frequency->Issue(D3DISSUE_END));
+            CHECK_HR_IS(drain(frequency,&hertz,sizeof hertz),S_OK);
+            outHex("INFO timestamp frequency=",hertz);
+            CHECK(hertz>1);
+            // Asking again answers the same clock.
+            UINT64 again=0;
+            CHECK_HR(frequency->Issue(D3DISSUE_END));
+            CHECK_HR_IS(drain(frequency,&again,sizeof again),S_OK);
+            CHECK(again==hertz);
+        }
+        if(frequency)frequency->Release();
+        if(disjoint)disjoint->Release();
+    }
+
+    // A query outlives a Reset: it holds the device and its context, which Reset
+    // keeps.
+    IDirect3DQuery9* survivor=nullptr;
+    CHECK_HR(device->CreateQuery(D3DQUERYTYPE_EVENT,&survivor));
+    CHECK(refsOf(device)==deviceRefs+1);
+
     // Reset rebuilds the swap chain, as D3D9 documents.
     CHECK_HR(device->Reset(&present));
+    if(survivor) {
+        BOOL signalled=FALSE;
+        CHECK_HR(survivor->Issue(D3DISSUE_END));
+        CHECK_HR_IS(drain(survivor,&signalled,sizeof signalled),S_OK);
+        CHECK(signalled==TRUE);
+        survivor->Release();
+    }
+    CHECK(refsOf(device)==deviceRefs);
     IDirect3DSurface9* afterReset=nullptr;
     CHECK_HR(device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,&afterReset));
     CHECK(afterReset!=nullptr);
