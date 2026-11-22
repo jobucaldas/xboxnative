@@ -78,6 +78,7 @@ typedef void (*NatFn)(bool, uint32_t, uint32_t, uint32_t&, uint32_t&);
 NATIVE_SIZES(n_add, "add") NATIVE_SIZES(n_or, "or") NATIVE_SIZES(n_adc, "adc") NATIVE_SIZES(n_sbb, "sbb")
 NATIVE_SIZES(n_and, "and") NATIVE_SIZES(n_sub, "sub") NATIVE_SIZES(n_xor, "xor") NATIVE_SIZES(n_cmp, "cmp")
 NATIVE_SHIFTS(n_rol, "rol") NATIVE_SHIFTS(n_ror, "ror") NATIVE_SHIFTS(n_shl, "shl") NATIVE_SHIFTS(n_shr, "shr") NATIVE_SHIFTS(n_sar, "sar")
+NATIVE_SHIFTS(n_rcl, "rcl") NATIVE_SHIFTS(n_rcr, "rcr")
 NATIVE_FN(n_inc32, "incl", "%%eax") NATIVE_FN(n_dec32, "decl", "%%eax") NATIVE_FN(n_neg32, "negl", "%%eax") NATIVE_FN(n_not32, "notl", "%%eax")
 NATIVE_FN(n_inc8, "incb", "%%al") NATIVE_FN(n_dec16, "decw", "%%ax")
 NATIVE_FN(n_imul32, "imul", "%%ecx, %%eax") NATIVE_FN(n_imul16, "imul", "%%cx, %%ax")
@@ -135,6 +136,45 @@ static void test_shift() {
         EXPECT(!((m.cpu.eflags ^ nf) & def), "shift%u sop%d a=%x cnt=%u cf=%d: flags got %x want %x (mask %x)", size, sops[k], a, cnt, cf, m.cpu.eflags & def, nf & def, def);
         alu_cases += 2;
     }
+}
+// RCL/RCR (group 2 /2 /3) through every encoding (C0/C1 imm8, D0/D1 by 1, D2/D3 by CL), 8/16/32-bit, register and
+// memory operands, counts 0..33, both input CF. Result and CF (and OF for count 1, undefined past it) come from this
+// CPU; SF/ZF/PF/AF must stay exactly as they were, and count 0 leaves every flag alone. With X86_DBT=1
+// the same programs also run with the translator enabled (register 32-bit forms translate, the rest fall back).
+static void test_rotate_carry() {
+    Machine m, t; bool dbt = std::getenv("X86_DBT") && !std::strcmp(std::getenv("X86_DBT"), "1") && t.mem.base();
+    t.cpu.dbt_enabled = dbt;
+    NatFn nat[2][3] = {{n_rcl_8, n_rcl_16, n_rcl_32}, {n_rcr_8, n_rcr_16, n_rcr_32}};
+    const uint32_t kept = PF | AF | ZF | SF;
+    for (unsigned cnt = 0; cnt <= 33; ++cnt) for (uint32_t a : vals) for (int cf = 0; cf < 2; ++cf) for (uint32_t extra : {0u, kept | OF})
+    for (int k = 0; k < 2; ++k) for (int si = 0; si < 3; ++si) for (int form = 0; form < 3; ++form) for (int mem = 0; mem < 2; ++mem) {
+        if (form == 1 && cnt != 1) continue;
+        unsigned size = si == 0 ? 8 : si == 1 ? 16 : 32; uint32_t msk = size == 32 ? 0xffffffffu : (1u << size) - 1;
+        std::vector<uint8_t> enc; if (si == 1) enc.push_back(0x66);
+        enc.push_back(uint8_t((form == 0 ? 0xC0 : form == 1 ? 0xD0 : 0xD2) | (si ? 1 : 0)));
+        enc.push_back(uint8_t((mem ? 0x05 : 0xC0) | (2 + k) << 3));
+        if (mem) for (int i = 0; i < 4; ++i) enc.push_back(uint8_t(Machine::DATA >> (8 * i)));
+        if (form == 0) enc.push_back(uint8_t(cnt));
+        uint32_t nr, nf; nat[k][si](cf, a, cnt, nr, nf);
+        unsigned eff = cnt & 31; uint32_t init = 2u | (cf ? uint32_t(CF) : 0u) | extra;
+        for (Machine* mm : {&m, &t}) {
+            mm->cpu.dbt_unsupported.clear();  // keyed by EIP: an earlier untranslatable form must not pin CODE to the interpreter
+            size_t len = setup(*mm, enc, a, cnt, 0, cf); mm->cpu.eflags = init; mm->mem.w32(Machine::DATA, a);
+            EXPECT(mm->run_to_end(len), "rc%c program did not reach end", k ? 'r' : 'l');
+            uint32_t got = mem ? mm->mem.r32(Machine::DATA) : mm->cpu.reg[EAX], other = mem ? mm->cpu.reg[EAX] : mm->mem.r32(Machine::DATA);
+            EXPECT(((got ^ nr) & msk) == 0 && (got & ~msk) == (a & ~msk) && other == a, "rc%c%u form=%d mem=%d a=%x cnt=%u cf=%d: got %x want %x",
+                   k ? 'r' : 'l', size, form, mem, a, cnt, cf, got, nr);
+            uint32_t fl = mm->cpu.eflags;
+            if (!eff) EXPECT(fl == init, "rc%c%u count 0 changed flags: got %x want %x", k ? 'r' : 'l', size, fl, init);
+            else {
+                uint32_t def = CF | (eff == 1 ? uint32_t(OF) : 0u);
+                EXPECT(!((fl ^ nf) & def), "rc%c%u form=%d mem=%d a=%x cnt=%u cf=%d: flags got %x want %x (mask %x)", k ? 'r' : 'l', size, form, mem, a, cnt, cf, fl & def, nf & def, def);
+                EXPECT(!((fl ^ init) & kept), "rc%c%u form=%d mem=%d a=%x cnt=%u: SF/ZF/PF/AF must be untouched: got %x init %x", k ? 'r' : 'l', size, form, mem, a, cnt, fl & kept, init & kept);
+            }
+            ++alu_cases;
+        }
+    }
+    EXPECT(!dbt || t.cpu.translated_blocks > 0, "rcl/rcr: the translator never ran a block");
 }
 // inc/dec/neg/not, imul r,r/m, one-operand mul/imul and div/idiv (including #DE).
 static void test_unary_muldiv() {
@@ -2206,6 +2246,7 @@ int main(int argc, char** argv) {
         {"pe32-layout", test_pe32_layout_rejections, "X86-CORE PASS: PE32 layout rejections name the failed predicate and values without accepting malformed fixtures"},
         {"alu", test_alu, "X86-CORE PASS: add/or/adc/sbb/and/sub/xor/cmp 8/16/32-bit results and flags match this machine's CPU"},
         {"shift", test_shift, "X86-CORE PASS: rol/ror/shl/shr/sar 8/16/32-bit count 0..33 results and defined flags match this machine's CPU"},
+        {"rotate-carry", test_rotate_carry, "X86-CORE PASS: rcl/rcr via C0/C1/D0/D1/D2/D3, 8/16/32-bit, register and memory, count 0..33, both input CF match this machine's CPU; SF/ZF/PF/AF untouched, count 0 leaves all flags"},
         {"unary", test_unary_muldiv, "X86-CORE PASS: inc/dec/neg/not, imul, mul/imul/div/idiv (incl. #DE) match this machine's CPU"},
         {"programs", test_programs, "X86-CORE PASS: control flow, addressing, string ops, FS base, W^X and explicit faults"},
         {"fpu", test_fpu, "X86-CORE PASS: x87 f64 arithmetic and fcomip, SSE scalar double/single arithmetic, int<->float conversion and SSE2 packed integer match this machine's CPU bit for bit"},
