@@ -34,6 +34,8 @@ has "PE32 Mesa mapped through Play's loader" 'play_runtime::map_opengl_runtime(p
 count "PE32 GL proc lookup maps Mesa before resolving" 'x86_mesa_map();' 1
 has "PE32 wglGetProcAddress fallback resolves through Play's loader" 'play_runtime::openglExport("wglGetProcAddress")'
 grep -Fq 'static HMODULE map_opengl_runtime(' "$here/../host/play_runtime.h" || { echo "launch-bugbot-guards: missing: play_runtime maps opengl32 for the PE32 route" >&2; fail=1; }
+has "staged x86 Steam DLL reports its staged module path" 'x86::set_staged_module_path(wrapped?"steamclient.dll":"steam_api.dll",play_runtime::narrow(target));'
+count "staged module paths cleared before and after the PE32 run" 'x86::clear_staged_module_paths();' 2
 
 if [[ $fail -ne 0 ]]; then exit 1; fi
 echo "launch-bugbot-guards: PASS ($src)"

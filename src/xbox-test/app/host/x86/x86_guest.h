@@ -41,6 +41,15 @@ inline SteamClientRegistry& steam_client_registry_config() { static SteamClientR
 inline void set_steam_client_registry(uint32_t account,const std::string& client) {
     steam_client_registry_config()={account,client};
 }
+// Full host paths of the Steam DLLs the launcher staged after its ownership
+// check (lowercase module name -> path). GetModuleFileName answers them for
+// that module so the emulator finds steam_settings beside its own file.
+inline std::map<std::string,std::string>& staged_module_paths() { static std::map<std::string,std::string> paths; return paths; }
+inline void set_staged_module_path(std::string module,const std::string& path) {
+    for(char& ch:module)ch=char(std::tolower((unsigned char)ch));
+    if(path.empty())staged_module_paths().erase(module);else staged_module_paths()[module]=path;
+}
+inline void clear_staged_module_paths() { staged_module_paths().clear(); }
 
 // ---- guest heap: first-fit free list over a lazily mapped guest arena ----
 struct GuestHeap {
@@ -125,6 +134,7 @@ struct Guest {
     }
     std::string exe_path, cmdline;
     SteamClientRegistry steam_registry=steam_client_registry_config();
+    std::map<std::string,std::string> module_paths=staged_module_paths();
     std::map<uint32_t,bool> steam_registry_keys;
     uint32_t steam_registry_serial=0;
     std::map<uint32_t,uintptr_t> registry_handles;
@@ -2008,13 +2018,26 @@ inline void Guest::register_all() {
     reg.add("kernel32.dll", "IsDBCSLeadByteEx", Conv::Stdcall, 2, [](Cpu&) -> uint32_t { return 0; });
     reg.add("kernel32.dll", "IsDBCSLeadByte", Conv::Stdcall, 1, [](Cpu&) -> uint32_t { return 0; });
     // (hModule, lpFilename, nSize): arg(0) is the module handle, not the buffer.
-    reg.add("kernel32.dll", "GetModuleFileNameA", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+    // The main module (NULL or the exe base) is the exe name; a staged Steam DLL
+    // reports its full staged path. Any other module keeps the exe answer.
+    auto module_file_name = [this](uint32_t module) -> const std::string& {
+        if (module && module != image_base)
+            for (const auto& kv : modules) {
+                if (kv.second != module) continue;
+                auto path = module_paths.find(kv.first);
+                if (path != module_paths.end()) return path->second;
+            }
+        return exe_path;
+    };
+    reg.add("kernel32.dll", "GetModuleFileNameA", Conv::Stdcall, 3, [this,module_file_name](Cpu& c) -> uint32_t {
         uint32_t buf = c.arg(1), n = c.arg(2); if (!buf || !n) return 0;
-        uint32_t put = uint32_t(exe_path.size()) < n ? uint32_t(exe_path.size()) : n - 1;
-        mem.write_bytes(buf, exe_path.data(), put); mem.w8(buf + put, 0); return put; });
-    reg.add("kernel32.dll", "GetModuleFileNameW", Conv::Stdcall, 3, [this](Cpu& c) -> uint32_t {
+        const std::string& file = module_file_name(c.arg(0));
+        uint32_t put = uint32_t(file.size()) < n ? uint32_t(file.size()) : n - 1;
+        mem.write_bytes(buf, file.data(), put); mem.w8(buf + put, 0); return put; });
+    reg.add("kernel32.dll", "GetModuleFileNameW", Conv::Stdcall, 3, [this,module_file_name](Cpu& c) -> uint32_t {
         uint32_t buf = c.arg(1), n = c.arg(2); if (!buf || !n) return 0;
-        std::u16string w(exe_path.begin(), exe_path.end());
+        const std::string& file = module_file_name(c.arg(0));
+        std::u16string w(file.begin(), file.end());
         uint32_t put = uint32_t(w.size()) < n ? uint32_t(w.size()) : n - 1;
         for (uint32_t i = 0; i < put; ++i) { mem.w8(buf + i * 2, uint8_t(w[i])); mem.w8(buf + i * 2 + 1, uint8_t(w[i] >> 8)); }
         mem.w8(buf + put * 2, 0); mem.w8(buf + put * 2 + 1, 0); return put; });

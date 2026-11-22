@@ -11,15 +11,16 @@ dlltool="$(dirname "$cc32")/i686-w64-mingw32-dlltool"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-steam-provider.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
 flags=(-O1 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protector -nostdlib)
 "$cc32" "${flags[@]}" -DSTEAM_PROVIDER_DLL -shared -Wl,--entry,0 -Wl,--image-base,0x20000000 \
-  -Wl,--export-all-symbols -o "$tmp/steam_api.dll" "$here/x86-steam-provider-fixture.c"
+  -Wl,--export-all-symbols -o "$tmp/steam_api.dll" "$here/x86-steam-provider-fixture.c" -lkernel32
 cat > "$tmp/steam_api.def" <<'EOF'
 LIBRARY steam_api.dll
 EXPORTS
     SteamAPI_Init=_SteamAPI_Init
+    SteamAPI_SelfPath=_SteamAPI_SelfPath
 EOF
 "$dlltool" -m i386 -k -d "$tmp/steam_api.def" -l "$tmp/libsteam_api.a"
 "$cc32" "${flags[@]}" -Wl,--entry,_fixture_main -Wl,--subsystem,console \
-  -o "$tmp/fixture.exe" "$here/x86-steam-provider-fixture.c" -L"$tmp" -lsteam_api -ladvapi32
+  -o "$tmp/fixture.exe" "$here/x86-steam-provider-fixture.c" -L"$tmp" -lsteam_api -ladvapi32 -lkernel32
 "${CXX:-c++}" -std=c++17 -O2 -mno-red-zone -Wall -Wextra -Werror \
   "$here/x86-steam-provider.cpp" -o "$tmp/x86-steam-provider"
 "$tmp/x86-steam-provider" "$tmp/fixture.exe" "$tmp/steam_api.dll"

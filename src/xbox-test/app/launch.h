@@ -448,6 +448,8 @@ static bool stage_steam_provider_x86(uint32_t appid,const std::wstring& exePath)
             std::to_string(session->steamid)+"\nlanguage=english\n[user::saves]\nlocal_save_path=./saves\n");
         write_text(dir+L"\\steam_settings\\configs.main.ini","[main::connectivity]\ndisable_networking=1\n");
         if(wrapped)x86::set_steam_client_registry(uint32_t(session->steamid),play_runtime::narrow(target));
+        // The staged DLL's own module path is where gbe reads steam_settings (the dll_source serves the same name).
+        x86::set_staged_module_path(wrapped?"steamclient.dll":"steam_api.dll",play_runtime::narrow(target));
         staged=true;
         return true;
     });
@@ -1216,7 +1218,7 @@ static bool x86_mesa_map() {
 static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& exe) {
     char line[512];
     regb::init(g_dir,lp_sink); // guest registry (PlayerPrefs) for the PE32 route too: LocalState\registry.sqlite
-    x86::set_steam_client_registry(0,"");
+    x86::set_steam_client_registry(0,"");x86::clear_staged_module_paths();
     const bool steamstub=steamstub_wrapped(path);
     const bool steamProvider=stage_steam_provider_x86(c.appid,path);
     if(steamProvider) {
@@ -1679,7 +1681,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
         try{cloud_sync(c.appid,c.root,true,0);}catch(...){lp_sink("STEAM cloud upload: exception");}
         try{achievements_sync(c.appid,true);}catch(...){lp_sink("STEAM achievements: upload exception");}
     }
-    x86::set_steam_client_registry(0,"");
+    x86::set_steam_client_registry(0,"");x86::clear_staged_module_paths();
     c.mapped=r.loaded?1:0;
     g_launch.pe32Finished=r.finished;
     g_launch.pe32ExitCode=r.exit_code;
