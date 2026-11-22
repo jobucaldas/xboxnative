@@ -30,6 +30,10 @@ struct Carrier {
     DWORD (*index)() = nullptr;
     BYTE* (*block)() = nullptr;
     size_t capacity = 65536;
+    // Registers the hook the carrier calls with its index from its FIRST TLS
+    // callback on thread/process detach: after every FLS callback, before its
+    // CRT TLS callbacks and DllMain. Required to expand the slot past capacity.
+    void (*onExit)(void (*)(DWORD)) = nullptr;
 };
 struct ThreadTlsBlock {
     DWORD index;
@@ -38,32 +42,26 @@ struct ThreadTlsBlock {
     size_t capacity;
     ThreadTlsBlock* next;
 };
-static DWORD threadTlsFls=FLS_OUT_OF_INDEXES;
+// Per-thread list in a TlsAlloc slot, like the TEB static-TLS slot it swaps.
+// Not FLS: ntdll runs FLS callbacks first on thread exit, so a guest's later
+// FLS callback would see the carrier's block in place of its own TLS.
+static DWORD threadTlsSlot=TLS_OUT_OF_INDEXES;
 static INIT_ONCE threadTlsOnce=INIT_ONCE_STATIC_INIT;
-static VOID CALLBACK releaseThreadTlsBlocks(PVOID value) {
-    auto slots=(BYTE**)__readgsqword(0x58);
-    auto block=(ThreadTlsBlock*)value;
-    while(block) {
-        auto next=block->next;
-        if(slots && slots[block->index]==block->allocation) slots[block->index]=block->original;
-        HeapFree(GetProcessHeap(),0,block->allocation);
-        HeapFree(GetProcessHeap(),0,block);
-        block=next;
-    }
-}
-static BOOL CALLBACK createThreadTlsFls(PINIT_ONCE, PVOID, PVOID*) {
-    threadTlsFls=FlsAlloc(releaseThreadTlsBlocks);
-    return threadTlsFls!=FLS_OUT_OF_INDEXES;
+static void releaseThreadTlsBlock(DWORD index);
+static BOOL CALLBACK createThreadTlsSlot(PINIT_ONCE, PVOID, PVOID*) {
+    threadTlsSlot=TlsAlloc();
+    return threadTlsSlot!=TLS_OUT_OF_INDEXES;
 }
 static ThreadTlsBlock* threadTlsBlocks() {
-    if(!InitOnceExecuteOnce(&threadTlsOnce,createThreadTlsFls,nullptr,nullptr) || threadTlsFls==FLS_OUT_OF_INDEXES) return nullptr;
-    return (ThreadTlsBlock*)FlsGetValue(threadTlsFls);
+    if(!InitOnceExecuteOnce(&threadTlsOnce,createThreadTlsSlot,nullptr,nullptr) || threadTlsSlot==TLS_OUT_OF_INDEXES) return nullptr;
+    return (ThreadTlsBlock*)TlsGetValue(threadTlsSlot);
 }
 static BYTE* threadTlsBlock(const Carrier& carrier,DWORD index,size_t required) {
     if(!carrier.index || !carrier.block || index==TLS_OUT_OF_INDEXES || required>512u*1024*1024) return nullptr;
     if(required<=carrier.capacity) return carrier.block();
+    if(!carrier.onExit) return nullptr;
     auto list=threadTlsBlocks();
-    if(threadTlsFls==FLS_OUT_OF_INDEXES) return nullptr;
+    if(threadTlsSlot==TLS_OUT_OF_INDEXES) return nullptr;
     for(auto block=list;block;block=block->next)
         if(block->index==index) return required<=block->capacity?block->allocation:nullptr;
     auto slots=(BYTE**)__readgsqword(0x58);
@@ -74,15 +72,16 @@ static BYTE* threadTlsBlock(const Carrier& carrier,DWORD index,size_t required) 
     auto block=(ThreadTlsBlock*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(ThreadTlsBlock));
     if(!block) { HeapFree(GetProcessHeap(),0,allocation); return nullptr; }
     *block={index,original,allocation,required,list};
-    if(!FlsSetValue(threadTlsFls,block)) {
+    if(!TlsSetValue(threadTlsSlot,block)) {
         HeapFree(GetProcessHeap(),0,allocation); HeapFree(GetProcessHeap(),0,block); return nullptr;
     }
+    carrier.onExit(releaseThreadTlsBlock);
     slots[index]=allocation;
     return allocation;
 }
 static void releaseThreadTlsBlock(DWORD index) {
-    if(threadTlsFls==FLS_OUT_OF_INDEXES) return;
-    auto list=(ThreadTlsBlock*)FlsGetValue(threadTlsFls);
+    if(threadTlsSlot==TLS_OUT_OF_INDEXES) return;
+    auto list=(ThreadTlsBlock*)TlsGetValue(threadTlsSlot);
     ThreadTlsBlock** link=&list;
     while(*link && (*link)->index!=index) link=&(*link)->next;
     if(!*link) return;
@@ -90,7 +89,7 @@ static void releaseThreadTlsBlock(DWORD index) {
     auto slots=(BYTE**)__readgsqword(0x58);
     if(slots && slots[index]==block->allocation) slots[index]=block->original;
     HeapFree(GetProcessHeap(),0,block->allocation); HeapFree(GetProcessHeap(),0,block);
-    FlsSetValue(threadTlsFls,list);
+    TlsSetValue(threadTlsSlot,list);
 }
 using Resolver = uintptr_t (*)(const char*,const char*, WORD);
 struct Image {

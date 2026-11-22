@@ -16,6 +16,21 @@ __declspec(dllexport) unsigned char* carrier_block() {
     if (prefix>16) return nullptr;
     return carrier_bytes-prefix;
 }
+// Play may point this slot at a larger heap block. Its hook puts the original
+// back from this callback, which .CRT$XLB places before the CRT's own TLS
+// callbacks (.CRT$XLC/XLD) and which runs before DllMain and after every FLS
+// callback, so guest FLS callbacks still see guest TLS and the CRT never does.
+static void (*volatile carrier_exit_hook)(DWORD);
+__declspec(dllexport) void carrier_on_exit(void (*hook)(DWORD)) {
+    InterlockedExchangePointer((void* volatile*)&carrier_exit_hook,(void*)hook);
+}
+static void NTAPI carrier_exit(PVOID,DWORD reason,PVOID) {
+    auto hook=carrier_exit_hook;
+    if (hook && (reason==DLL_THREAD_DETACH || reason==DLL_PROCESS_DETACH)) hook(_tls_index);
+}
+#pragma section(".CRT$XLB",long,read)
+__declspec(allocate(".CRT$XLB")) extern const PIMAGE_TLS_CALLBACK carrier_exit_callback=carrier_exit;
+#pragma comment(linker,"/include:carrier_exit_callback")
 #ifdef CARRIER_A
 __declspec(dllexport) DWORD carrier_anchor_a() { return _tls_index; }
 #else

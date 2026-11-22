@@ -191,6 +191,8 @@ jobs:
           export WINEPREFIX="$RUNNER_TEMP/wine-prefix" PRUN_WINEPREFIX="$RUNNER_TEMP/wine-prefix"
           bash src/xbox-test/uwph/user32/corewindow-feed-test.sh
           bash src/xbox-test/uwph/user32/create-size-test.sh
+      - name: large static TLS thread exit with the packaged carrier under Wine
+        run: WINEPREFIX="$RUNNER_TEMP/wine-prefix" bash src/xbox-test/app/tests/tls-thread-exit.sh
   registry-persistence:
     runs-on: ubuntu-latest
     steps:
