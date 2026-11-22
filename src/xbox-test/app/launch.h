@@ -815,6 +815,61 @@ static void leaderboard_end() {
         g_leaderboards.bridge.reset(); g_leaderboards.persona.reset(); g_leaderboards.session.reset();
     }
 }
+// ---- Real Steam lobbies for the provider-served game (steam_matchmaking.h,
+// steam_lobbies.h). gbe_fork answers ISteamMatchmaking from its own LAN peer
+// network, so with no peers a game sees no lobbies. For a game that pumps its
+// callbacks with SteamAPI_ManualDispatch_*, the launcher answers the lobby calls
+// from the account's own CM session and queues the callbacks itself. The tap is
+// installed only for a launch that passed the ownership gate AND has a signed-in
+// CM session (the same gate as leaderboards and presence); otherwise, and for a
+// game that never calls ManualDispatch_Init, the provider answers unchanged.
+struct MatchmakingKeeper {
+    std::mutex m;
+    std::shared_ptr<steam_matchmaking::SerialExecutor> executor;   // the CM round trips, in order, off the game's thread
+};
+static MatchmakingKeeper g_matchmaking;
+static steam_lobbies::Io matchmaking_io() {
+    steam_lobbies::Io io;
+    // The session is looked up per request: the keeper may have re-established
+    // it since the launch began, and a lobby belongs to the account.
+    io.call=[](uint32_t emsg,uint32_t routing,const std::string& body,std::string& out){
+        auto session=user_session();
+        if(!session||!session->up||session->anon)return false;
+        out.clear();
+        // Steam sends no answer to these three; the effect arrives as a push.
+        if(emsg==steam_lobbies::SendLobbyChatMsg||emsg==steam_lobbies::SetLobbyGameServer||emsg==steam_lobbies::InviteToLobby){
+            session->send_raw(emsg,body,0,"",routing);
+            return session->up.load();
+        }
+        JobMsg m;if(!session->call(emsg,body,"",10000,m,routing))return false;
+        out=m.body;return true;};
+    io.log=[](const std::string& line){lp_sink(redact::steam_ids("STEAM "+line).c_str());};
+    return io;
+}
+static void matchmaking_end() {
+    std::shared_ptr<steam_matchmaking::SerialExecutor> executor;
+    { std::lock_guard<std::mutex> l(g_matchmaking.m); executor=std::move(g_matchmaking.executor); }
+    play_runtime::set_matchmaking_tap({});
+    if(executor)executor->stop();
+}
+static void matchmaking_start(uint32_t appid) {
+    matchmaking_end();   // a previous launch's tap never outlives it
+    auto session=user_session();
+    if(!session||!session->up||session->anon||!session->steamid) {
+        lp_sink("STEAM lobbies: no signed-in CM session; the provider answers lobbies");
+        return;
+    }
+    auto executor=std::make_shared<steam_matchmaking::SerialExecutor>([]{init_apartment(apartment_type::multi_threaded);});
+    steam_matchmaking::Config config;
+    config.io=matchmaking_io();
+    config.executor=executor->executor();
+    config.appid=appid;
+    config.self_id=session->steamid;
+    if(const char* name=g_leaderboards.persona.self_name())config.persona=name;
+    { std::lock_guard<std::mutex> l(g_matchmaking.m); g_matchmaking.executor=executor; }
+    play_runtime::set_matchmaking_tap({std::make_shared<steam_matchmaking::Service>(std::move(config))});
+    lp_sink("STEAM lobbies: ISteamMatchmaking is answered from this account's Steam session for games that read callbacks with ManualDispatch");
+}
 // ---- Steam achievements/stats for the provider-served game (steam_achievements.h)
 #include "steam_achievements.h"
 // The guide's achievements tab (main.cpp): filled once gbe's files are prepared.
@@ -973,6 +1028,12 @@ static void presence_tap_clear() {
 // self-check below, or another client starting a game. Runs on the CM reader
 // thread, so it never blocks: the tap's lock is only taken to read state.
 static void presence_push(const JobMsg& m) {
+    // Lobby pushes (data, members, chat, game server): queued as the callbacks a
+    // game waits for, only while the lobby tap is active.
+    if(steam_matchmaking::Matchmaking::is_push(m.emsg)) {
+        play_runtime::matchmaking_push(m.emsg,m.body);
+        return;
+    }
     if(m.emsg==steam_auth::ClientAuthListAck) {
         std::lock_guard<std::mutex> l(g_auth.m);
         if(g_auth.appid) g_auth.bridge.ack(m.body);
@@ -1120,6 +1181,7 @@ static void final_sync(uint32_t appid,const std::wstring& gameRoot) {
     try{auth_end();}catch(...){}
     try{presence_end();}catch(...){}
     try{leaderboard_end();}catch(...){}
+    try{matchmaking_end();}catch(...){}
 }
 // ---- Diagnostic: cmd.txt "stacks" logs every other thread's call stack to
 // launch_probe.log (module+offset via Play's guest module map). Live process
@@ -1768,6 +1830,7 @@ static void lp_run_impl(LpCtx& c) {
         try{auth_start(c.appid);}catch(...){lp_sink("STEAM auth tickets: bridge did not start");}
         try{presence_start(c.appid);}catch(...){lp_sink("STEAM presence: keeper did not start");}
         try{leaderboard_start(c.appid);}catch(...){lp_sink("STEAM leaderboards: bridge did not start");}
+        try{matchmaking_start(c.appid);}catch(...){lp_sink("STEAM lobbies: tap did not start");}
     }
     if(steamProvider){uint32_t appid=c.appid;std::wstring root=c.root;g_finalSync=[appid,root]{final_sync(appid,root);};}
     if(!g_signedClient.empty()&&!play_runtime::seed_steam_client_registry(g_signedClient,g_clientAccount))

@@ -914,9 +914,243 @@ static steam_matchmaking::Hub matchmakingHub;
 static void set_matchmaking_tap(MatchmakingTap tap) {
     matchmakingHub.set(std::move(tap.service));
 }
+// An unsolicited CM message (lobby data, members, chat, game server), from the CM
+// reader thread. Taken only while the tap is active; false means "not for us".
+static bool matchmaking_push(uint32_t emsg,const std::string& body) {
+    return matchmakingHub.on_push(emsg,body);
+}
 static std::atomic<uintptr_t> matchmakingRealInit{0}, matchmakingRealPipe{0}, matchmakingRealNext{0},
     matchmakingRealFree{0}, matchmakingRealResult{0}, matchmakingRealCreate{0}, matchmakingRealList{0},
     matchmakingRealIndex{0}, matchmakingRealJoin{0}, matchmakingRealLeave{0};
+// The rest of ISteamMatchmaking: lobby data, members, owner, game server, list
+// filters and chat. Each export keeps its own slot for the provider's function;
+// with no tap installed, or before the game called ManualDispatch_Init, the hub
+// calls that function with the same arguments.
+enum MmId { MmLobbyData, MmSetData, MmDeleteData, MmDataCount, MmDataByIndex, MmRequestData, MmMemberData, MmSetMemberData, MmNumMembers, MmMemberByIndex, MmOwner, MmSetOwner, MmMemberLimit, MmSetMemberLimit, MmSetType, MmSetJoinable, MmGetServer, MmSetServer, MmStringFilter, MmNumericalFilter, MmNearFilter, MmSlotsFilter, MmDistanceFilter, MmCountFilter, MmCompatibleFilter, MmSendChat, MmChatEntry };
+template<int Id> struct MmSlot { static inline std::atomic<uintptr_t> real{0}; };
+template<int Id,class Fn> static Fn mmReal() { return (Fn)MmSlot<Id>::real.load(std::memory_order_acquire); }
+static uintptr_t matchmakingLobbyHook(const char* name,uintptr_t real) {
+    static const char prefix[]="SteamAPI_ISteamMatchmaking_";
+    if(strncmp(name,prefix,sizeof prefix-1)) return 0;
+    name+=sizeof prefix-1;
+    if(!strcmp(name,"GetLobbyData")) {
+        using Fn=steam_matchmaking::LobbyStrFn;
+        MmSlot<MmLobbyData>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,const char* key)->const char*{
+            return matchmakingHub.lobby_data(mmReal<MmLobbyData,Fn>(),self,lobby,key);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SetLobbyData")) {
+        using Fn=steam_matchmaking::SetDataFn;
+        MmSlot<MmSetData>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,const char* key,const char* value)->bool{
+            return matchmakingHub.set_lobby_data(mmReal<MmSetData,Fn>(),self,lobby,key,value);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"DeleteLobbyData")) {
+        using Fn=steam_matchmaking::DelDataFn;
+        MmSlot<MmDeleteData>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,const char* key)->bool{
+            return matchmakingHub.delete_lobby_data(mmReal<MmDeleteData,Fn>(),self,lobby,key);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"GetLobbyDataCount")) {
+        using Fn=steam_matchmaking::LobbyIntFn;
+        MmSlot<MmDataCount>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby)->int{
+            return matchmakingHub.lobby_data_count(mmReal<MmDataCount,Fn>(),self,lobby);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"GetLobbyDataByIndex")) {
+        using Fn=steam_matchmaking::DataByIndexFn;
+        MmSlot<MmDataByIndex>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,int index,char* key,int keySize,char* value,int valueSize)->bool{
+            return matchmakingHub.lobby_data_by_index(mmReal<MmDataByIndex,Fn>(),self,lobby,index,key,keySize,value,valueSize);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"RequestLobbyData")) {
+        using Fn=steam_matchmaking::LobbyBoolFn;
+        MmSlot<MmRequestData>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby)->bool{
+            return matchmakingHub.request_lobby_data(mmReal<MmRequestData,Fn>(),self,lobby);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"GetLobbyMemberData")) {
+        using Fn=steam_matchmaking::MemberDataFn;
+        MmSlot<MmMemberData>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,uint64_t member,const char* key)->const char*{
+            return matchmakingHub.lobby_member_data(mmReal<MmMemberData,Fn>(),self,lobby,member,key);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SetLobbyMemberData")) {
+        using Fn=steam_matchmaking::SetMemberDataFn;
+        MmSlot<MmSetMemberData>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,const char* key,const char* value)->void{
+            matchmakingHub.set_lobby_member_data(mmReal<MmSetMemberData,Fn>(),self,lobby,key,value);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"GetNumLobbyMembers")) {
+        using Fn=steam_matchmaking::LobbyIntFn;
+        MmSlot<MmNumMembers>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby)->int{
+            return matchmakingHub.num_lobby_members(mmReal<MmNumMembers,Fn>(),self,lobby);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"GetLobbyMemberByIndex")) {
+        using Fn=steam_matchmaking::MemberByIndexFn;
+        MmSlot<MmMemberByIndex>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,int index)->uint64_t{
+            return matchmakingHub.lobby_member_by_index(mmReal<MmMemberByIndex,Fn>(),self,lobby,index);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"GetLobbyOwner")) {
+        using Fn=steam_matchmaking::JoinFn;
+        MmSlot<MmOwner>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby)->uint64_t{
+            return matchmakingHub.lobby_owner(mmReal<MmOwner,Fn>(),self,lobby);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SetLobbyOwner")) {
+        using Fn=steam_matchmaking::SetOwnerFn;
+        MmSlot<MmSetOwner>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,uint64_t owner)->bool{
+            return matchmakingHub.set_lobby_owner(mmReal<MmSetOwner,Fn>(),self,lobby,owner);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"GetLobbyMemberLimit")) {
+        using Fn=steam_matchmaking::LobbyIntFn;
+        MmSlot<MmMemberLimit>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby)->int{
+            return matchmakingHub.lobby_member_limit(mmReal<MmMemberLimit,Fn>(),self,lobby);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SetLobbyMemberLimit")) {
+        using Fn=steam_matchmaking::LobbyIntSetFn;
+        MmSlot<MmSetMemberLimit>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,int limit)->bool{
+            return matchmakingHub.set_lobby_member_limit(mmReal<MmSetMemberLimit,Fn>(),self,lobby,limit);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SetLobbyType")) {
+        using Fn=steam_matchmaking::LobbyIntSetFn;
+        MmSlot<MmSetType>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,int type)->bool{
+            return matchmakingHub.set_lobby_type(mmReal<MmSetType,Fn>(),self,lobby,type);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SetLobbyJoinable")) {
+        using Fn=steam_matchmaking::JoinableFn;
+        MmSlot<MmSetJoinable>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,bool joinable)->bool{
+            return matchmakingHub.set_lobby_joinable(mmReal<MmSetJoinable,Fn>(),self,lobby,joinable);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"GetLobbyGameServer")) {
+        using Fn=steam_matchmaking::GetServerFn;
+        MmSlot<MmGetServer>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,uint32_t* ip,uint16_t* port,uint64_t* server)->bool{
+            return matchmakingHub.lobby_game_server(mmReal<MmGetServer,Fn>(),self,lobby,ip,port,server);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SetLobbyGameServer")) {
+        using Fn=steam_matchmaking::SetServerFn;
+        MmSlot<MmSetServer>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,uint32_t ip,uint16_t port,uint64_t server)->void{
+            matchmakingHub.set_lobby_game_server(mmReal<MmSetServer,Fn>(),self,lobby,ip,port,server);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"AddRequestLobbyListStringFilter")) {
+        using Fn=steam_matchmaking::StringFilterFn;
+        MmSlot<MmStringFilter>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,const char* key,const char* value,int comparison)->void{
+            matchmakingHub.string_filter(mmReal<MmStringFilter,Fn>(),self,key,value,comparison);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"AddRequestLobbyListNumericalFilter")) {
+        using Fn=steam_matchmaking::NumericalFilterFn;
+        MmSlot<MmNumericalFilter>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,const char* key,int value,int comparison)->void{
+            matchmakingHub.numerical_filter(mmReal<MmNumericalFilter,Fn>(),self,key,value,comparison);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"AddRequestLobbyListNearValueFilter")) {
+        using Fn=steam_matchmaking::NearFilterFn;
+        MmSlot<MmNearFilter>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,const char* key,int value)->void{
+            matchmakingHub.near_value_filter(mmReal<MmNearFilter,Fn>(),self,key,value);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"AddRequestLobbyListFilterSlotsAvailable")) {
+        using Fn=steam_matchmaking::IntArgFn;
+        MmSlot<MmSlotsFilter>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,int slots)->void{
+            matchmakingHub.slots_available_filter(mmReal<MmSlotsFilter,Fn>(),self,slots);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"AddRequestLobbyListDistanceFilter")) {
+        using Fn=steam_matchmaking::IntArgFn;
+        MmSlot<MmDistanceFilter>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,int distance)->void{
+            matchmakingHub.distance_filter(mmReal<MmDistanceFilter,Fn>(),self,distance);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"AddRequestLobbyListResultCountFilter")) {
+        using Fn=steam_matchmaking::IntArgFn;
+        MmSlot<MmCountFilter>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,int count)->void{
+            matchmakingHub.result_count_filter(mmReal<MmCountFilter,Fn>(),self,count);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"AddRequestLobbyListCompatibleMembersFilter")) {
+        using Fn=steam_matchmaking::U64ArgFn;
+        MmSlot<MmCompatibleFilter>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby)->void{
+            matchmakingHub.compatible_members_filter(mmReal<MmCompatibleFilter,Fn>(),self,lobby);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"SendLobbyChatMsg")) {
+        using Fn=steam_matchmaking::SendChatFn;
+        MmSlot<MmSendChat>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,const void* body,int size)->bool{
+            return matchmakingHub.send_lobby_chat(mmReal<MmSendChat,Fn>(),self,lobby,body,size);
+        };
+        return (uintptr_t)hook;
+    }
+    if(!strcmp(name,"GetLobbyChatEntry")) {
+        using Fn=steam_matchmaking::ChatEntryFn;
+        MmSlot<MmChatEntry>::real.store(real,std::memory_order_release);
+        static Fn hook=[](void* self,uint64_t lobby,int chatId,uint64_t* user,void* data,int size,int32_t* type)->int{
+            return matchmakingHub.lobby_chat_entry(mmReal<MmChatEntry,Fn>(),self,lobby,chatId,user,data,size,type);
+        };
+        return (uintptr_t)hook;
+    }
+    return 0;
+}
 static uintptr_t matchmakingHook(const char* name,uintptr_t real) {
     if(!real) return 0;
     if(!strcmp(name,"SteamAPI_ManualDispatch_Init")) {
@@ -1000,7 +1234,7 @@ static uintptr_t matchmakingHook(const char* name,uintptr_t real) {
         };
         return (uintptr_t)hook;
     }
-    return 0;
+    return matchmakingLobbyHook(name,real);
 }
 static uintptr_t steamApiExport(Module& module,const char* name,uintptr_t address) {
     if(!address||!name||strcmp(module.key.c_str(),"steam_api64.dll")) return address;
