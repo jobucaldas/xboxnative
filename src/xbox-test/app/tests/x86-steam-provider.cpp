@@ -63,6 +63,12 @@ int main(int argc, char** argv) {
     set_staged_module_path("steam_api.dll",stagedApi);
     bool ok=check("owned standard provider",run("fixture.exe s",owned),42);
     clear_staged_module_paths();
+    // Non-ASCII staged path: UTF-8 bytes through the A API, UTF-16 (with a surrogate
+    // pair) through the W API, including truncation.
+    set_steam_client_registry(1234,"C:\\steamclient.dll");
+    set_staged_module_path("steam_api.dll","C:\\u\303\251\346\227\245\346\234\254\350\252\236\360\237\230\200\\steam_api.dll");
+    ok=check("non-ASCII staged path",run("fixture.exe u",owned),45)&&ok;
+    clear_staged_module_paths();
     // Nothing staged (no ownership): the game's own steam_api.dll is served, no
     // staged path is reported for it and ActiveProcess is not published.
     set_steam_client_registry(0,"");
@@ -76,6 +82,6 @@ int main(int argc, char** argv) {
     set_steam_client_registry(0,"");
     clear_staged_module_paths();
     if (!ok) return 1;
-    std::puts("X86-STEAM-PROVIDER PASS: ownership gate blocks unsigned/unowned staging, PE32 SteamAPI_Init binds to the staged provider, SteamStub keeps steam_api.dll and serves steamclient.dll, ActiveProcess reads owner/client values, GetModuleFileNameA/W report staged DLL paths and keep the exe name for the main module");
+    std::puts("X86-STEAM-PROVIDER PASS: ownership gate blocks unsigned/unowned staging, PE32 SteamAPI_Init binds to the staged provider, SteamStub keeps steam_api.dll and serves steamclient.dll, ActiveProcess reads owner/client values, GetModuleFileNameA/W report staged DLL paths (UTF-8 decoded for W) with the Windows truncation and last-error contract, GetModuleHandleEx FROM_ADDRESS is bounded to each image");
     return 0;
 }
