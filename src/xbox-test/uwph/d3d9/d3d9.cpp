@@ -1059,6 +1059,175 @@ struct SwapChain : d3dshim::Base, IDirect3DSwapChain9 {
 }
 
 namespace {
+// ---------------------------------------------------------------- state blocks
+struct Device;
+
+// D3D9 splits the device's loose state into a pixel half and a vertex half. A
+// few states are listed under both (fog, shade mode); D3DSBT_ALL also takes
+// what is in neither half (streams, viewport, transforms, ...), and a render
+// state this table does not name is covered by D3DSBT_ALL only.
+constexpr unsigned scopePixel=1,scopeVertex=2;
+inline unsigned renderStateScope(unsigned state) {
+    switch(state) {
+    case D3DRS_ALPHABLENDENABLE:case D3DRS_ALPHAFUNC:case D3DRS_ALPHAREF:case D3DRS_ALPHATESTENABLE:
+    case D3DRS_ANTIALIASEDLINEENABLE:case D3DRS_BLENDFACTOR:case D3DRS_BLENDOP:case D3DRS_BLENDOPALPHA:
+    case D3DRS_COLORWRITEENABLE:case D3DRS_COLORWRITEENABLE1:case D3DRS_COLORWRITEENABLE2:
+    case D3DRS_COLORWRITEENABLE3:case D3DRS_DEPTHBIAS:case D3DRS_DESTBLEND:case D3DRS_DESTBLENDALPHA:
+    case D3DRS_DITHERENABLE:case D3DRS_FILLMODE:case D3DRS_LASTPIXEL:case D3DRS_SCISSORTESTENABLE:
+    case D3DRS_SEPARATEALPHABLENDENABLE:case D3DRS_SLOPESCALEDEPTHBIAS:case D3DRS_SRCBLEND:
+    case D3DRS_SRCBLENDALPHA:case D3DRS_SRGBWRITEENABLE:case D3DRS_STENCILENABLE:case D3DRS_STENCILFAIL:
+    case D3DRS_STENCILFUNC:case D3DRS_STENCILMASK:case D3DRS_STENCILPASS:case D3DRS_STENCILREF:
+    case D3DRS_STENCILWRITEMASK:case D3DRS_STENCILZFAIL:case D3DRS_TEXTUREFACTOR:
+    case D3DRS_TWOSIDEDSTENCILMODE:case D3DRS_CCW_STENCILFAIL:case D3DRS_CCW_STENCILPASS:
+    case D3DRS_CCW_STENCILFUNC:case D3DRS_CCW_STENCILZFAIL:case D3DRS_ZENABLE:case D3DRS_ZFUNC:
+    case D3DRS_ZWRITEENABLE:
+        return scopePixel;
+    case D3DRS_FOGCOLOR:case D3DRS_FOGDENSITY:case D3DRS_FOGENABLE:case D3DRS_FOGEND:
+    case D3DRS_FOGSTART:case D3DRS_FOGTABLEMODE:case D3DRS_SHADEMODE:
+        return scopePixel|scopeVertex;
+    case D3DRS_ADAPTIVETESS_X:case D3DRS_ADAPTIVETESS_Y:case D3DRS_ADAPTIVETESS_Z:
+    case D3DRS_ADAPTIVETESS_W:case D3DRS_AMBIENT:case D3DRS_AMBIENTMATERIALSOURCE:case D3DRS_CLIPPING:
+    case D3DRS_CLIPPLANEENABLE:case D3DRS_COLORVERTEX:case D3DRS_CULLMODE:
+    case D3DRS_DIFFUSEMATERIALSOURCE:case D3DRS_EMISSIVEMATERIALSOURCE:
+    case D3DRS_ENABLEADAPTIVETESSELLATION:case D3DRS_FOGVERTEXMODE:case D3DRS_INDEXEDVERTEXBLENDENABLE:
+    case D3DRS_LIGHTING:case D3DRS_LOCALVIEWER:case D3DRS_MAXTESSELLATIONLEVEL:
+    case D3DRS_MINTESSELLATIONLEVEL:case D3DRS_MULTISAMPLEANTIALIAS:case D3DRS_MULTISAMPLEMASK:
+    case D3DRS_NORMALDEGREE:case D3DRS_NORMALIZENORMALS:case D3DRS_PATCHEDGESTYLE:
+    case D3DRS_POINTSCALE_A:case D3DRS_POINTSCALE_B:case D3DRS_POINTSCALE_C:
+    case D3DRS_POINTSCALEENABLE:case D3DRS_POINTSIZE:case D3DRS_POINTSIZE_MAX:case D3DRS_POINTSIZE_MIN:
+    case D3DRS_POINTSPRITEENABLE:case D3DRS_POSITIONDEGREE:case D3DRS_RANGEFOGENABLE:
+    case D3DRS_SPECULARENABLE:case D3DRS_SPECULARMATERIALSOURCE:case D3DRS_TWEENFACTOR:
+    case D3DRS_VERTEXBLEND:
+        return scopeVertex;
+    default:
+        // The texture-coordinate wrap modes are two runs of states.
+        if((state>=D3DRS_WRAP0&&state<=D3DRS_WRAP7)||(state>=D3DRS_WRAP8&&state<=D3DRS_WRAP15))
+            return scopePixel;
+        return 0;
+    }
+}
+// TEXCOORDINDEX and TEXTURETRANSFORMFLAGS belong to both pixel and vertex
+// state blocks; the sampler's displacement-map offset is the one vertex-side
+// sampler state.
+inline unsigned textureStageStateScope(unsigned type) {
+    return type==D3DTSS_TEXCOORDINDEX||type==D3DTSS_TEXTURETRANSFORMFLAGS?scopePixel|scopeVertex:scopePixel;
+}
+inline unsigned samplerStateScope(unsigned type) {
+    return type==D3DSAMP_DMAPOFFSET?scopeVertex:scopePixel;
+}
+// Takes a reference on `value` before dropping the one `slot` held, so
+// re-holding the object the slot already has is safe.
+template<class T> inline void hold(T*& slot,T* value) {
+    if(value)value->AddRef();
+    if(slot)slot->Release();
+    slot=value;
+}
+
+// A state block is a subset of the device's loose state: the `*Owned` flags say
+// which entries it covers and the arrays beside them hold the values. A block
+// made by CreateStateBlock covers a fixed subset and is filled by Capture; one
+// made by BeginStateBlock/EndStateBlock covers exactly what was set between the
+// two calls. COM objects it holds (textures, buffers, shaders, declaration) are
+// held with a strong reference, so they outlive the guest's own.
+//
+// While a block records it belongs to the device alone and `owner` stays null:
+// the device holds the one reference, so recording makes no reference cycle.
+// EndStateBlock hands that reference to the guest and takes the device's.
+struct StateBlock : d3dshim::Base, IDirect3DStateBlock9 {
+    StateBlock() { self=static_cast<IDirect3DStateBlock9*>(this);
+        D3DSHIM_IDS(&__uuidof(IDirect3DStateBlock9)); }
+    // The held objects go before the device (`owner`, released by ~Base).
+    ~StateBlock() {
+        for(unsigned i=0;i<textureStageCount;++i)if(textures[i])textures[i]->Release();
+        for(unsigned i=0;i<streamCount;++i)if(streams[i])streams[i]->Release();
+        if(indices)indices->Release();
+        if(declaration)declaration->Release();
+        if(vertexShader)vertexShader->Release();
+        if(pixelShader)pixelShader->Release();
+    }
+    D3DSHIM_REF
+    D3DSHIM_QI
+    Device* device=nullptr;
+    bool rsOwned[renderStateCount]{};
+    bool tssOwned[textureStageCount][32]{};
+    bool samplerOwned[samplerStateCount][16]{};
+    bool textureOwned[textureStageCount]{};
+    bool streamOwned[streamCount]{};
+    bool vertexConstOwned[maxVertexConst]{};
+    bool pixelConstOwned[maxPixelConst]{};
+    bool ownsIndices=false,ownsDeclaration=false,ownsFvf=false,ownsVertexShader=false,
+         ownsPixelShader=false,ownsViewport=false,ownsScissor=false,ownsWorld=false,ownsView=false,
+         ownsProjection=false,ownsMaterial=false;
+    DWORD renderStates[renderStateCount]{};
+    DWORD textureStageStates[textureStageCount][32]{};
+    DWORD samplerStates[samplerStateCount][16]{};
+    IDirect3DBaseTexture9* textures[textureStageCount]{};
+    IDirect3DVertexBuffer9* streams[streamCount]{};
+    UINT streamOffsets[streamCount]{};
+    UINT streamStrides[streamCount]{};
+    IDirect3DIndexBuffer9* indices=nullptr;
+    IDirect3DVertexDeclaration9* declaration=nullptr;
+    DWORD fvf=0;
+    IDirect3DVertexShader9* vertexShader=nullptr;
+    IDirect3DPixelShader9* pixelShader=nullptr;
+    float vertexConstF[maxVertexConst][4]{};
+    float pixelConstF[maxPixelConst][4]{};
+    D3DVIEWPORT9 viewport{};
+    RECT scissor{};
+    D3DMATRIX world{},view{},projection{};
+    D3DMATERIAL9 material{};
+
+    // The subset a CreateStateBlock type covers.
+    void select(D3DSTATEBLOCKTYPE type) {
+        const bool all=type==D3DSBT_ALL;
+        const unsigned scope=all?scopePixel|scopeVertex:type==D3DSBT_PIXELSTATE?scopePixel:scopeVertex;
+        const bool pixel=(scope&scopePixel)!=0,vertex=(scope&scopeVertex)!=0;
+        for(unsigned i=0;i<renderStateCount;++i)rsOwned[i]=all||(renderStateScope(i)&scope)!=0;
+        for(unsigned s=0;s<textureStageCount;++s) {
+            for(unsigned t=0;t<32;++t)tssOwned[s][t]=(textureStageStateScope(t)&scope)!=0;
+            textureOwned[s]=all;
+        }
+        for(unsigned s=0;s<samplerStateCount;++s)
+            for(unsigned t=0;t<16;++t)samplerOwned[s][t]=(samplerStateScope(t)&scope)!=0;
+        ownsPixelShader=pixel;
+        for(unsigned i=0;i<maxPixelConst;++i)pixelConstOwned[i]=pixel;
+        ownsVertexShader=ownsDeclaration=ownsFvf=vertex;
+        for(unsigned i=0;i<maxVertexConst;++i)vertexConstOwned[i]=vertex;
+        for(unsigned i=0;i<streamCount;++i)streamOwned[i]=all;
+        ownsIndices=ownsViewport=ownsScissor=ownsWorld=ownsView=ownsProjection=ownsMaterial=all;
+    }
+    // Recording: what a Set* call writes into the block instead of the device.
+    void recordConstants(bool vertex,UINT start,const float* data,UINT count) {
+        if(vertex) {
+            memcpy(vertexConstF[start],data,count*sizeof(float[4]));
+            for(UINT i=0;i<count;++i)vertexConstOwned[start+i]=true;
+        } else {
+            memcpy(pixelConstF[start],data,count*sizeof(float[4]));
+            for(UINT i=0;i<count;++i)pixelConstOwned[start+i]=true;
+        }
+    }
+    D3DMATRIX* transformSlot(D3DTRANSFORMSTATETYPE type,bool** owned) {
+        switch(unsigned(type)) {
+        case D3DTS_WORLD:*owned=&ownsWorld;return &world;
+        case D3DTS_VIEW:*owned=&ownsView;return &view;
+        case D3DTS_PROJECTION:*owned=&ownsProjection;return &projection;
+        default:return nullptr;
+        }
+    }
+    HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9** out) override {
+        if(!out)return D3DERR_INVALIDCALL;
+        *out=static_cast<IDirect3DDevice9*>(owner);
+        if(!*out)return D3DERR_INVALIDCALL;
+        (*out)->AddRef();
+        return D3D_OK;
+    }
+    // Both are defined once Device is complete.
+    HRESULT STDMETHODCALLTYPE Capture() override;
+    HRESULT STDMETHODCALLTYPE Apply() override;
+};
+}
+
+namespace {
 // --------------------------------------------------------------------- device
 struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     ~Device() {
@@ -1066,6 +1235,9 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         // nothing outlives the device (Wine's present path never finishes
         // process exit while a D3D object outlives its device).
         if(ID3D11DeviceContext* immediate=context())immediate->ClearState();
+        // A block still recording is the device's alone (it holds no reference
+        // on the device), so abandoning it here frees it.
+        if(recording)recording->Release();
         renderTarget.clear();depthStencil.clear();
         for(unsigned i=0;i<textureStageCount;++i)if(textures[i]){textures[i]->Release();textures[i]=nullptr;}
         for(unsigned i=0;i<streamCount;++i)if(streams[i]){streams[i]->Release();streams[i]=nullptr;}
@@ -1114,6 +1286,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     RECT scissor{};
     IDirect3D9Ex* parent=nullptr;       // the factory that made this device
     D3DDEVTYPE deviceType=D3DDEVTYPE_HAL;
+    StateBlock* recording=nullptr;      // between BeginStateBlock and EndStateBlock
     // ------------------------------------------------------- pipeline objects
     // D3D11 keeps its pipeline state in objects, D3D9 in loose state values.
     // The shim caches the objects it derives from the loose values and rebuilds
@@ -1246,6 +1419,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     UINT STDMETHODCALLTYPE GetNumberOfSwapChains() override { return 1; }
     HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS* parameters) override {
         if(!parameters)return D3DERR_INVALIDCALL;
+        if(recording){recording->Release();recording=nullptr;}
         return rebuildSwapChain(parameters);
     }
     HRESULT STDMETHODCALLTYPE Present(const RECT* src,const RECT* dst,HWND override,const RGNDATA* dirty) override {
@@ -1579,6 +1753,11 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     }
     HRESULT STDMETHODCALLTYPE SetTransform(D3DTRANSFORMSTATETYPE state,const D3DMATRIX* matrix) override {
         if(!matrix)return D3DERR_INVALIDCALL;
+        if(recording) {
+            bool* owned=nullptr;
+            if(D3DMATRIX* slot=recording->transformSlot(state,&owned)){*slot=*matrix;*owned=true;}
+            return D3D_OK;
+        }
         switch(state) {
         case D3DTS_WORLD:world=*matrix;break;
         case D3DTS_VIEW:view=*matrix;break;
@@ -1610,6 +1789,17 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     }
     HRESULT STDMETHODCALLTYPE MultiplyTransform(D3DTRANSFORMSTATETYPE state,const D3DMATRIX* matrix) override {
         if(!matrix)return D3DERR_INVALIDCALL;
+        if(recording) {
+            // The product is taken against what the block holds for this
+            // matrix, or against the device's when the block has none yet.
+            bool* owned=nullptr;
+            D3DMATRIX* slot=recording->transformSlot(state,&owned);
+            if(!slot)return D3D_OK;
+            if(!*owned)*slot=state==D3DTS_WORLD?world:state==D3DTS_VIEW?view:projection;
+            *slot=multiply(*slot,*matrix);
+            *owned=true;
+            return D3D_OK;
+        }
         D3DMATRIX* target=state==D3DTS_WORLD?&world:state==D3DTS_VIEW?&view
                         :state==D3DTS_PROJECTION?&projection:nullptr;
         if(!target)return D3D_OK;
@@ -1631,6 +1821,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     }
     HRESULT STDMETHODCALLTYPE SetViewport(const D3DVIEWPORT9* value) override {
         if(!value)return D3DERR_INVALIDCALL;
+        if(recording){recording->viewport=*value;recording->ownsViewport=true;return D3D_OK;}
         viewport=*value;
         D3D11_VIEWPORT out{};
         out.TopLeftX=float(value->X);out.TopLeftY=float(value->Y);
@@ -1646,6 +1837,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     }
     HRESULT STDMETHODCALLTYPE SetMaterial(const D3DMATERIAL9* value) override {
         if(!value)return D3DERR_INVALIDCALL;
+        if(recording){recording->material=*value;recording->ownsMaterial=true;return D3D_OK;}
         material=*value;
         ffpVertexSignature=0;   // the generated shader reads the material's diffuse
         return D3D_OK;
@@ -1672,6 +1864,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     }
     HRESULT STDMETHODCALLTYPE SetRenderState(D3DRENDERSTATETYPE state,DWORD value) override {
         if(unsigned(state)>=renderStateCount)return D3DERR_INVALIDCALL;
+        if(recording){recording->renderStates[state]=value;recording->rsOwned[state]=true;return D3D_OK;}
         renderStates[state]=value;
         // The pipeline objects are rebuilt from these values at the next draw;
         // the signatures are what decides which of them actually changed.
@@ -1682,15 +1875,45 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         *value=renderStates[state];
         return D3D_OK;
     }
-    HRESULT STDMETHODCALLTYPE CreateStateBlock(D3DSTATEBLOCKTYPE,IDirect3DStateBlock9** out) override {
-        if(out)*out=nullptr;
-        d3dshim::noteOnce("D3D9 shim: state blocks are not implemented");
-        return D3DERR_INVALIDCALL;
+    // A snapshot of the subset of state `type` names, taken now. D3D9 refuses
+    // one while another block is recording.
+    HRESULT STDMETHODCALLTYPE CreateStateBlock(D3DSTATEBLOCKTYPE type,IDirect3DStateBlock9** out) override {
+        if(!out)return D3DERR_INVALIDCALL;
+        *out=nullptr;
+        if(type!=D3DSBT_ALL&&type!=D3DSBT_PIXELSTATE&&type!=D3DSBT_VERTEXSTATE)return D3DERR_INVALIDCALL;
+        if(recording)return D3DERR_INVALIDCALL;
+        auto block=d3dshim::create<StateBlock>();
+        if(!block)return E_OUTOFMEMORY;
+        block->device=this;
+        block->owner=static_cast<IDirect3DDevice9*>(self);
+        block->owner->AddRef();
+        block->select(type);
+        block->Capture();
+        *out=block;
+        return D3D_OK;
     }
-    HRESULT STDMETHODCALLTYPE BeginStateBlock() override { return D3DERR_INVALIDCALL; }
+    // From here until EndStateBlock the state-setting calls fill the new block
+    // and leave the device's own state alone.
+    HRESULT STDMETHODCALLTYPE BeginStateBlock() override {
+        if(recording)return D3DERR_INVALIDCALL;
+        auto block=d3dshim::create<StateBlock>();
+        if(!block)return E_OUTOFMEMORY;
+        block->device=this;
+        recording=block;
+        return D3D_OK;
+    }
     HRESULT STDMETHODCALLTYPE EndStateBlock(IDirect3DStateBlock9** out) override {
-        if(out)*out=nullptr;
-        return D3DERR_INVALIDCALL;
+        if(!out)return D3DERR_INVALIDCALL;   // recording carries on
+        *out=nullptr;
+        if(!recording)return D3DERR_INVALIDCALL;
+        StateBlock* block=recording;
+        recording=nullptr;
+        // The device's reference is the one the guest now holds; the block
+        // takes its own on the device, which it may now outlive.
+        block->owner=static_cast<IDirect3DDevice9*>(self);
+        block->owner->AddRef();
+        *out=block;
+        return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE SetClipStatus(const D3DCLIPSTATUS9*) override { return D3D_OK; }
     HRESULT STDMETHODCALLTYPE GetClipStatus(D3DCLIPSTATUS9* status) override {
@@ -1710,6 +1933,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     }
     HRESULT STDMETHODCALLTYPE SetTexture(DWORD stage,IDirect3DBaseTexture9* texture) override {
         if(stage>=textureStageCount)return D3DERR_INVALIDCALL;
+        if(recording){hold(recording->textures[stage],texture);recording->textureOwned[stage]=true;return D3D_OK;}
         if(textures[stage]==texture)return D3D_OK;
         if(texture)texture->AddRef();
         if(textures[stage])textures[stage]->Release();
@@ -1723,6 +1947,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     }
     HRESULT STDMETHODCALLTYPE SetTextureStageState(DWORD stage,D3DTEXTURESTAGESTATETYPE type,DWORD value) override {
         if(stage>=textureStageCount||unsigned(type)>=32)return D3DERR_INVALIDCALL;
+        if(recording){recording->textureStageStates[stage][type]=value;recording->tssOwned[stage][type]=true;return D3D_OK;}
         textureStageStates[stage][type]=value;
         ffpPixelSignature=0;   // the generated pixel shader's stages changed
         return D3D_OK;
@@ -1734,6 +1959,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     }
     HRESULT STDMETHODCALLTYPE SetSamplerState(DWORD sampler,D3DSAMPLERSTATETYPE type,DWORD value) override {
         if(sampler>=samplerStateCount||unsigned(type)>=16)return D3DERR_INVALIDCALL;
+        if(recording){recording->samplerStates[sampler][type]=value;recording->samplerOwned[sampler][type]=true;return D3D_OK;}
         samplerStates[sampler][type]=value;
         samplerSignature[sampler]=0;   // the D3D11 sampler state is rebuilt
         return D3D_OK;
@@ -1751,6 +1977,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     }
     HRESULT STDMETHODCALLTYPE SetScissorRect(const RECT* rect) override {
         if(!rect)return D3DERR_INVALIDCALL;
+        if(recording){recording->scissor=*rect;recording->ownsScissor=true;return D3D_OK;}
         scissor=*rect;
         D3D11_RECT out{rect->left,rect->top,rect->right,rect->bottom};
         context()->RSSetScissorRects(1,&out);
@@ -2601,6 +2828,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE SetVertexDeclaration(IDirect3DVertexDeclaration9* value) override {
+        if(recording){hold(recording->declaration,value);recording->ownsDeclaration=true;return D3D_OK;}
         if(value)value->AddRef();
         if(declaration)declaration->Release();
         declaration=value;
@@ -2614,6 +2842,13 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE SetFVF(DWORD value) override {
+        if(recording) {
+            // An FVF replaces the declaration, so the block records both.
+            recording->fvf=value;recording->ownsFvf=true;
+            hold(recording->declaration,static_cast<IDirect3DVertexDeclaration9*>(nullptr));
+            recording->ownsDeclaration=true;
+            return D3D_OK;
+        }
         fvf=value;
         // Setting an FVF replaces the declaration, as D3D9 documents.
         if(declaration){declaration->Release();declaration=nullptr;}
@@ -2649,6 +2884,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE SetVertexShader(IDirect3DVertexShader9* shader) override {
+        if(recording){hold(recording->vertexShader,shader);recording->ownsVertexShader=true;return D3D_OK;}
         if(shader)shader->AddRef();
         if(vertexShader)vertexShader->Release();
         vertexShader=shader;
@@ -2661,12 +2897,13 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE SetVertexShaderConstantF(UINT start,const float* data,UINT count) override {
-        if(!data||start+count>maxVertexConst)return D3DERR_INVALIDCALL;
+        if(!data||start>maxVertexConst||count>maxVertexConst-start)return D3DERR_INVALIDCALL;
+        if(recording){recording->recordConstants(true,start,data,count);return D3D_OK;}
         memcpy(vertexConstF[start],data,count*sizeof(float[4]));
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE GetVertexShaderConstantF(UINT start,float* data,UINT count) override {
-        if(!data||start+count>maxVertexConst)return D3DERR_INVALIDCALL;
+        if(!data||start>maxVertexConst||count>maxVertexConst-start)return D3DERR_INVALIDCALL;
         memcpy(data,vertexConstF[start],count*sizeof(float[4]));
         return D3D_OK;
     }
@@ -2676,6 +2913,12 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     HRESULT STDMETHODCALLTYPE GetVertexShaderConstantB(UINT,WINBOOL*,UINT) override { return D3DERR_INVALIDCALL; }
     HRESULT STDMETHODCALLTYPE SetStreamSource(UINT stream,IDirect3DVertexBuffer9* buffer,UINT offset,UINT stride) override {
         if(stream>=streamCount)return D3DERR_INVALIDCALL;
+        if(recording) {
+            hold(recording->streams[stream],buffer);
+            recording->streamOffsets[stream]=offset;recording->streamStrides[stream]=stride;
+            recording->streamOwned[stream]=true;
+            return D3D_OK;
+        }
         if(buffer)buffer->AddRef();
         if(streams[stream])streams[stream]->Release();
         streams[stream]=buffer;
@@ -2695,6 +2938,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE SetIndices(IDirect3DIndexBuffer9* buffer) override {
+        if(recording){hold(recording->indices,buffer);recording->ownsIndices=true;return D3D_OK;}
         if(buffer)buffer->AddRef();
         if(indices)indices->Release();
         indices=buffer;
@@ -2727,6 +2971,7 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE SetPixelShader(IDirect3DPixelShader9* shader) override {
+        if(recording){hold(recording->pixelShader,shader);recording->ownsPixelShader=true;return D3D_OK;}
         if(shader)shader->AddRef();
         if(pixelShader)pixelShader->Release();
         pixelShader=shader;
@@ -2739,12 +2984,13 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE SetPixelShaderConstantF(UINT start,const float* data,UINT count) override {
-        if(!data||start+count>maxPixelConst)return D3DERR_INVALIDCALL;
+        if(!data||start>maxPixelConst||count>maxPixelConst-start)return D3DERR_INVALIDCALL;
+        if(recording){recording->recordConstants(false,start,data,count);return D3D_OK;}
         memcpy(pixelConstF[start],data,count*sizeof(float[4]));
         return D3D_OK;
     }
     HRESULT STDMETHODCALLTYPE GetPixelShaderConstantF(UINT start,float* data,UINT count) override {
-        if(!data||start+count>maxPixelConst)return D3DERR_INVALIDCALL;
+        if(!data||start>maxPixelConst||count>maxPixelConst-start)return D3DERR_INVALIDCALL;
         memcpy(data,pixelConstF[start],count*sizeof(float[4]));
         return D3D_OK;
     }
@@ -3013,6 +3259,98 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
         return D3D_OK;
     }
 };
+}
+
+namespace {
+// ------------------------------------------------------- state block contents
+// Re-reads the device's current value of every entry the block covers; entries
+// it does not cover keep what they held. Neither call is valid while the
+// device is recording, as the block would be reading or writing state that the
+// recording is meant to leave alone.
+HRESULT STDMETHODCALLTYPE StateBlock::Capture() {
+    Device& d=*device;
+    if(d.recording)return D3DERR_INVALIDCALL;
+    for(unsigned i=0;i<renderStateCount;++i)
+        if(rsOwned[i])renderStates[i]=d.renderStates[i];
+    for(unsigned s=0;s<textureStageCount;++s) {
+        for(unsigned t=0;t<32;++t)
+            if(tssOwned[s][t])textureStageStates[s][t]=d.textureStageStates[s][t];
+        if(textureOwned[s])hold(textures[s],d.textures[s]);
+    }
+    for(unsigned s=0;s<samplerStateCount;++s)
+        for(unsigned t=0;t<16;++t)
+            if(samplerOwned[s][t])samplerStates[s][t]=d.samplerStates[s][t];
+    for(unsigned i=0;i<streamCount;++i) {
+        if(!streamOwned[i])continue;
+        hold(streams[i],d.streams[i]);
+        streamOffsets[i]=d.streamOffsets[i];streamStrides[i]=d.streamStrides[i];
+    }
+    if(ownsIndices)hold(indices,d.indices);
+    if(ownsDeclaration)hold(declaration,d.declaration);
+    if(ownsFvf)fvf=d.fvf;
+    if(ownsVertexShader)hold(vertexShader,d.vertexShader);
+    if(ownsPixelShader)hold(pixelShader,d.pixelShader);
+    for(unsigned i=0;i<maxVertexConst;++i)
+        if(vertexConstOwned[i])memcpy(vertexConstF[i],d.vertexConstF[i],sizeof vertexConstF[i]);
+    for(unsigned i=0;i<maxPixelConst;++i)
+        if(pixelConstOwned[i])memcpy(pixelConstF[i],d.pixelConstF[i],sizeof pixelConstF[i]);
+    if(ownsViewport)viewport=d.viewport;
+    if(ownsScissor)scissor=d.scissor;
+    if(ownsWorld)world=d.world;
+    if(ownsView)view=d.view;
+    if(ownsProjection)projection=d.projection;
+    if(ownsMaterial)material=d.material;
+    return D3D_OK;
+}
+
+// Writes every entry the block covers back through the device's own setters, so
+// each takes its reference and invalidates the pipeline objects built from it
+// exactly as a guest's call would.
+HRESULT STDMETHODCALLTYPE StateBlock::Apply() {
+    Device& d=*device;
+    if(d.recording)return D3DERR_INVALIDCALL;
+    for(unsigned i=0;i<renderStateCount;++i)
+        if(rsOwned[i])d.SetRenderState(D3DRENDERSTATETYPE(i),renderStates[i]);
+    for(unsigned s=0;s<textureStageCount;++s) {
+        for(unsigned t=0;t<32;++t)
+            if(tssOwned[s][t])d.SetTextureStageState(s,D3DTEXTURESTAGESTATETYPE(t),textureStageStates[s][t]);
+        if(textureOwned[s])d.SetTexture(s,textures[s]);
+    }
+    for(unsigned s=0;s<samplerStateCount;++s)
+        for(unsigned t=0;t<16;++t)
+            if(samplerOwned[s][t])d.SetSamplerState(s,D3DSAMPLERSTATETYPE(t),samplerStates[s][t]);
+    for(unsigned i=0;i<streamCount;++i)
+        if(streamOwned[i])d.SetStreamSource(i,streams[i],streamOffsets[i],streamStrides[i]);
+    if(ownsIndices)d.SetIndices(indices);
+    // SetFVF would clear the declaration, so the FVF is written directly and
+    // the declaration (which the block holds as it was) goes through its setter.
+    if(ownsFvf){d.fvf=fvf;d.ffpVertexSignature=0;}
+    if(ownsDeclaration)d.SetVertexDeclaration(declaration);
+    if(ownsVertexShader)d.SetVertexShader(vertexShader);
+    if(ownsPixelShader)d.SetPixelShader(pixelShader);
+    // Constants go back in runs, as the guest's own calls take them.
+    for(unsigned i=0;i<maxVertexConst;) {
+        if(!vertexConstOwned[i]){++i;continue;}
+        unsigned end=i;
+        while(end<maxVertexConst&&vertexConstOwned[end])++end;
+        d.SetVertexShaderConstantF(i,vertexConstF[i],end-i);
+        i=end;
+    }
+    for(unsigned i=0;i<maxPixelConst;) {
+        if(!pixelConstOwned[i]){++i;continue;}
+        unsigned end=i;
+        while(end<maxPixelConst&&pixelConstOwned[end])++end;
+        d.SetPixelShaderConstantF(i,pixelConstF[i],end-i);
+        i=end;
+    }
+    if(ownsViewport)d.SetViewport(&viewport);
+    if(ownsScissor)d.SetScissorRect(&scissor);
+    if(ownsWorld)d.SetTransform(D3DTS_WORLD,&world);
+    if(ownsView)d.SetTransform(D3DTS_VIEW,&view);
+    if(ownsProjection)d.SetTransform(D3DTS_PROJECTION,&projection);
+    if(ownsMaterial)d.SetMaterial(&material);
+    return D3D_OK;
+}
 }
 
 namespace {

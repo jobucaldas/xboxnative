@@ -101,6 +101,71 @@ static HRESULT drain(IDirect3DQuery9* query,void* data,DWORD size) {
 }
 static ULONG refsOf(IUnknown* object) { object->AddRef();return object->Release(); }
 
+// State-block fixtures. Two vs_2_0 shaders over a float3 POSITION in clip
+// space (`mov oPos, v0` and `add oPos, v0, c0`, so a vertex constant moves the
+// geometry) and two ps_2_0 shaders that write a constant (`mov oC0, c0` / c1).
+static const DWORD passVs[]={0xFFFE0200,0x0200001F,0x80000000,0x900F0000,
+                             0x02000001,0xC00F0000,0x90E40000,0x0000FFFF};
+static const DWORD offsetVs[]={0xFFFE0200,0x0200001F,0x80000000,0x900F0000,
+                               0x03000002,0xC00F0000,0x90E40000,0xA0E40000,0x0000FFFF};
+static const DWORD constantPs0[]={0xFFFF0200,0x02000001,0x800F0800,0xA0E40000,0x0000FFFF};
+static const DWORD constantPs1[]={0xFFFF0200,0x02000001,0x800F0800,0xA0E40001,0x0000FFFF};
+struct ColourVertex { float x,y,z,w; DWORD colour; };
+// A pre-transformed (XYZRHW) triangle covering the middle of a 64x64 target.
+static IDirect3DVertexBuffer9* colourTriangle(IDirect3DDevice9Ex* device,DWORD colour) {
+    IDirect3DVertexBuffer9* buffer=nullptr;
+    if(FAILED(device->CreateVertexBuffer(3*sizeof(ColourVertex),D3DUSAGE_WRITEONLY,0,D3DPOOL_MANAGED,
+            &buffer,nullptr))||!buffer)return nullptr;
+    ColourVertex* v=nullptr;
+    if(SUCCEEDED(buffer->Lock(0,0,reinterpret_cast<void**>(&v),0))&&v) {
+        v[0]={ 8.0f, 8.0f,0.0f,1.0f,colour};
+        v[1]={56.0f, 8.0f,0.0f,1.0f,colour};
+        v[2]={32.0f,56.0f,0.0f,1.0f,colour};
+    }
+    buffer->Unlock();
+    return buffer;
+}
+// The same coverage in clip space, as three floats a vertex shader reads.
+static IDirect3DVertexBuffer9* clipTriangle(IDirect3DDevice9Ex* device) {
+    IDirect3DVertexBuffer9* buffer=nullptr;
+    if(FAILED(device->CreateVertexBuffer(3*3*sizeof(float),D3DUSAGE_WRITEONLY,0,D3DPOOL_MANAGED,
+            &buffer,nullptr))||!buffer)return nullptr;
+    float* v=nullptr;
+    if(SUCCEEDED(buffer->Lock(0,0,reinterpret_cast<void**>(&v),0))&&v) {
+        const float data[9]={-0.75f,-0.75f,0.5f, 0.75f,-0.75f,0.5f, 0.0f,0.75f,0.5f};
+        for(unsigned i=0;i<9;++i)v[i]=data[i];
+    }
+    buffer->Unlock();
+    return buffer;
+}
+// Clears `target`, draws one triangle with whatever the device now holds, and
+// returns the pixel at (x,y) as 0x00RRGGBB, or 0xFFFFFFFF when a call failed.
+static DWORD drawAndRead(IDirect3DDevice9Ex* device,IDirect3DSurface9* target,IDirect3DSurface9* staging,
+                         unsigned x,unsigned y) {
+    if(FAILED(device->SetRenderTarget(0,target)))return 0xFFFFFFFFu;
+    if(FAILED(device->Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1.0f,0)))return 0xFFFFFFFFu;
+    device->BeginScene();
+    const HRESULT drawn=device->DrawPrimitive(D3DPT_TRIANGLELIST,0,1);
+    device->EndScene();
+    if(FAILED(drawn)||FAILED(device->GetRenderTargetData(target,staging)))return 0xFFFFFFFFu;
+    D3DLOCKED_RECT locked{};
+    if(FAILED(staging->LockRect(&locked,nullptr,D3DLOCK_READONLY))||!locked.pBits)return 0xFFFFFFFFu;
+    const unsigned char* p=static_cast<const unsigned char*>(locked.pBits)+y*locked.Pitch+x*4;
+    const DWORD rgb=DWORD(p[2])<<16|DWORD(p[1])<<8|p[0];
+    staging->UnlockRect();
+    return rgb;
+}
+static bool sameMatrix(const D3DMATRIX& a,const D3DMATRIX& b) {
+    for(unsigned r=0;r<4;++r)for(unsigned c=0;c<4;++c)if(a.m[r][c]!=b.m[r][c])return false;
+    return true;
+}
+static bool sameViewport(const D3DVIEWPORT9& a,const D3DVIEWPORT9& b) {
+    return a.X==b.X&&a.Y==b.Y&&a.Width==b.Width&&a.Height==b.Height&&a.MinZ==b.MinZ&&a.MaxZ==b.MaxZ;
+}
+static bool sameRect(const RECT& a,const RECT& b) {
+    return a.left==b.left&&a.top==b.top&&a.right==b.right&&a.bottom==b.bottom;
+}
+
 extern "C" DWORD WINAPI d3d9_test_entry() {
     HMODULE module=loadShim();
     if(!module) {
@@ -1158,14 +1223,694 @@ extern "C" DWORD WINAPI d3d9_test_entry() {
         if(disjoint)disjoint->Release();
     }
 
+    // State blocks. Every section proves a restore twice: the Get* calls read
+    // the state back, and a draw whose pixel depends on it reads it again.
+    {
+        const ULONG blockBase=refsOf(device);
+        IDirect3DSurface9* target=nullptr;
+        IDirect3DSurface9* staging=nullptr;
+        CHECK_HR(device->CreateRenderTarget(64,64,D3DFMT_X8R8G8B8,D3DMULTISAMPLE_NONE,0,FALSE,&target,nullptr));
+        CHECK_HR(device->CreateOffscreenPlainSurface(64,64,D3DFMT_X8R8G8B8,D3DPOOL_SYSTEMMEM,&staging,nullptr));
+        IDirect3DVertexBuffer9* red=colourTriangle(device,0xffff0000);
+        IDirect3DVertexBuffer9* blue=colourTriangle(device,0xff0000ff);
+        IDirect3DVertexBuffer9* clip=clipTriangle(device);
+        IDirect3DTexture9* texA=nullptr;
+        IDirect3DTexture9* texB=nullptr;
+        CHECK_HR(device->CreateTexture(2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texA,nullptr));
+        CHECK_HR(device->CreateTexture(2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&texB,nullptr));
+        IDirect3DIndexBuffer9* ibA=nullptr;
+        IDirect3DIndexBuffer9* ibB=nullptr;
+        CHECK_HR(device->CreateIndexBuffer(12,D3DUSAGE_WRITEONLY,D3DFMT_INDEX16,D3DPOOL_MANAGED,&ibA,nullptr));
+        CHECK_HR(device->CreateIndexBuffer(12,D3DUSAGE_WRITEONLY,D3DFMT_INDEX16,D3DPOOL_MANAGED,&ibB,nullptr));
+        IDirect3DVertexShader9* vsPass=nullptr;
+        IDirect3DVertexShader9* vsOffset=nullptr;
+        IDirect3DPixelShader9* psC0=nullptr;
+        IDirect3DPixelShader9* psC1=nullptr;
+        CHECK_HR(device->CreateVertexShader(passVs,&vsPass));
+        CHECK_HR(device->CreateVertexShader(offsetVs,&vsOffset));
+        CHECK_HR(device->CreatePixelShader(constantPs0,&psC0));
+        CHECK_HR(device->CreatePixelShader(constantPs1,&psC1));
+        const D3DVERTEXELEMENT9 positionOnly[]={
+            {0,0,D3DDECLTYPE_FLOAT3,D3DDECLMETHOD_DEFAULT,D3DDECLUSAGE_POSITION,0},D3DDECL_END()};
+        IDirect3DVertexDeclaration9* declA=nullptr;
+        CHECK_HR(device->CreateVertexDeclaration(positionOnly,&declA));
+        const bool ready=target&&staging&&red&&blue&&clip&&texA&&texB&&ibA&&ibB&&vsPass&&vsOffset
+            &&psC0&&psC1&&declA;
+        IDirect3DBaseTexture9* baseA=texA;
+        IDirect3DBaseTexture9* baseB=texB;
+        const D3DVIEWPORT9 vpA{0,0,64,64,0.0f,1.0f};
+        const D3DVIEWPORT9 vpB{0,0,32,32,0.25f,0.75f};
+        const RECT scissorA{0,0,64,64};
+        const RECT scissorB{0,0,16,16};
+        D3DMATRIX worldA{};worldA._11=worldA._22=worldA._33=worldA._44=1.0f;
+        D3DMATRIX worldB=worldA;worldB._11=2.0f;worldB._41=3.0f;
+        D3DMATRIX viewA=worldA;
+        D3DMATRIX viewB=worldA;viewB._42=5.0f;
+        D3DMATRIX projectionA=worldA;
+        D3DMATRIX projectionB=worldA;projectionB._33=0.5f;
+        D3DMATERIAL9 materialA{};materialA.Diffuse.r=1.0f;materialA.Diffuse.a=1.0f;
+        D3DMATERIAL9 materialB{};materialB.Diffuse.g=1.0f;materialB.Diffuse.a=0.5f;
+        const DWORD fvf0=D3DFVF_XYZRHW|D3DFVF_DIFFUSE;
+        const DWORD fvf1=D3DFVF_XYZRHW|D3DFVF_DIFFUSE|D3DFVF_TEX1;
+        const DWORD fvf2=D3DFVF_XYZRHW|D3DFVF_DIFFUSE|D3DFVF_TEX2;
+        const DWORD fvf3=D3DFVF_XYZRHW|D3DFVF_DIFFUSE|D3DFVF_TEX3;
+        const unsigned stride=sizeof(ColourVertex);
+        // Read-backs. Each returns what the device holds without keeping a
+        // reference, which is safe because the caller holds the object too.
+        auto rs=[&](D3DRENDERSTATETYPE s){DWORD v=0xdeadbeef;device->GetRenderState(s,&v);return v;};
+        auto ts=[&](DWORD stage,D3DTEXTURESTAGESTATETYPE t){DWORD v=0xdeadbeef;
+            device->GetTextureStageState(stage,t,&v);return v;};
+        auto ss=[&](DWORD sampler,D3DSAMPLERSTATETYPE t){DWORD v=0xdeadbeef;
+            device->GetSamplerState(sampler,t,&v);return v;};
+        auto texOf=[&](DWORD stage){IDirect3DBaseTexture9* t=nullptr;device->GetTexture(stage,&t);
+            if(t)t->Release();return t;};
+        auto streamOf=[&](UINT s,UINT* offset,UINT* strideOut){IDirect3DVertexBuffer9* b=nullptr;
+            *offset=0xdead;*strideOut=0xdead;device->GetStreamSource(s,&b,offset,strideOut);
+            if(b)b->Release();return b;};
+        auto indicesOf=[&](){IDirect3DIndexBuffer9* b=nullptr;device->GetIndices(&b);if(b)b->Release();return b;};
+        auto vsOf=[&](){IDirect3DVertexShader9* s=nullptr;device->GetVertexShader(&s);if(s)s->Release();return s;};
+        auto psOf=[&](){IDirect3DPixelShader9* s=nullptr;device->GetPixelShader(&s);if(s)s->Release();return s;};
+        auto declOf=[&](){IDirect3DVertexDeclaration9* d=nullptr;device->GetVertexDeclaration(&d);
+            if(d)d->Release();return d;};
+        auto fvfOf=[&](){DWORD v=0xdeadbeef;device->GetFVF(&v);return v;};
+        auto vsConst=[&](UINT reg){float v[4]={-1,-1,-1,-1};device->GetVertexShaderConstantF(reg,v,1);return v[0];};
+        auto psConst=[&](UINT reg){float v[4]={-1,-1,-1,-1};device->GetPixelShaderConstantF(reg,v,1);return v[0];};
+        auto viewportOf=[&](){D3DVIEWPORT9 v{};device->GetViewport(&v);return v;};
+        auto scissorOf=[&](){RECT r{};device->GetScissorRect(&r);return r;};
+        auto transformOf=[&](D3DTRANSFORMSTATETYPE t){D3DMATRIX m{};device->GetTransform(t,&m);return m;};
+        auto diffuseOf=[&](){D3DMATERIAL9 m{};device->GetMaterial(&m);return m;};
+        const D3DRENDERSTATETYPE unnamed=D3DRENDERSTATETYPE(250);   // in no half: D3DSBT_ALL only
+        if(ready) {
+            // ------------------------------------------------ D3DSBT_ALL
+            // A known state A, a block that holds it, then a state B that
+            // changes every kind of state the block covers.
+            const float vc20A[4]={1,2,3,4},vc20B[4]={9,8,7,6};
+            const float pc7A[4]={5,6,7,8},pc7B[4]={4,3,2,1};
+            CHECK_HR(device->SetVertexShader(nullptr));
+            CHECK_HR(device->SetPixelShader(nullptr));
+            CHECK_HR(device->SetVertexDeclaration(nullptr));
+            CHECK_HR(device->SetFVF(fvf0));
+            CHECK_HR(device->SetStreamSource(0,red,0,stride));
+            CHECK_HR(device->SetStreamSource(1,nullptr,0,0));
+            CHECK_HR(device->SetIndices(ibA));
+            CHECK_HR(device->SetTexture(0,texA));
+            CHECK_HR(device->SetTexture(3,nullptr));
+            CHECK_HR(device->SetRenderState(D3DRS_LIGHTING,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));
+            CHECK_HR(device->SetRenderState(D3DRS_ZENABLE,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_COLORWRITEENABLE,0xF));
+            CHECK_HR(device->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_TEXTUREFACTOR,0xff112233));
+            CHECK_HR(device->SetRenderState(D3DRS_ALPHAREF,0x10));
+            CHECK_HR(device->SetRenderState(D3DRS_FILLMODE,D3DFILL_SOLID));
+            CHECK_HR(device->SetRenderState(unnamed,1));
+            CHECK_HR(device->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT));
+            CHECK_HR(device->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_WRAP));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE));
+            CHECK_HR(device->SetTextureStageState(0,D3DTSS_TEXCOORDINDEX,0));
+            CHECK_HR(device->SetTextureStageState(2,D3DTSS_ALPHAARG2,D3DTA_CURRENT));
+            CHECK_HR(device->SetVertexShaderConstantF(20,vc20A,1));
+            CHECK_HR(device->SetPixelShaderConstantF(7,pc7A,1));
+            CHECK_HR(device->SetViewport(&vpA));
+            CHECK_HR(device->SetScissorRect(&scissorA));
+            CHECK_HR(device->SetTransform(D3DTS_WORLD,&worldA));
+            CHECK_HR(device->SetTransform(D3DTS_VIEW,&viewA));
+            CHECK_HR(device->SetTransform(D3DTS_PROJECTION,&projectionA));
+            CHECK_HR(device->SetMaterial(&materialA));
+            CHECK(drawAndRead(device,target,staging,32,32)==0xff0000);   // red: the draw works at all
+            IDirect3DStateBlock9* all=nullptr;
+            CHECK_HR(device->CreateStateBlock(D3DSBT_ALL,&all));
+            CHECK(all!=nullptr);
+            if(all) {
+                // B, first the part a draw shows: a different stream, only the
+                // red channel written, a scissor that excludes the middle, a
+                // smaller viewport. Any one left behind by Apply would show.
+                CHECK_HR(device->SetStreamSource(0,blue,0,stride));
+                CHECK_HR(device->SetRenderState(D3DRS_COLORWRITEENABLE,D3DCOLORWRITEENABLE_RED));
+                CHECK_HR(device->SetRenderState(D3DRS_SCISSORTESTENABLE,TRUE));
+                CHECK_HR(device->SetScissorRect(&scissorB));
+                CHECK_HR(device->SetViewport(&vpB));
+                CHECK(drawAndRead(device,target,staging,32,32)==0x000000);
+                // ...then everything else the block covers.
+                CHECK_HR(device->SetFVF(fvf1));
+                CHECK_HR(device->SetVertexDeclaration(declA));
+                CHECK_HR(device->SetStreamSource(0,blue,4,16));
+                CHECK_HR(device->SetStreamSource(1,red,8,20));
+                CHECK_HR(device->SetIndices(ibB));
+                CHECK_HR(device->SetTexture(0,texB));
+                CHECK_HR(device->SetTexture(3,texA));
+                CHECK_HR(device->SetVertexShader(vsPass));
+                CHECK_HR(device->SetPixelShader(psC0));
+                CHECK_HR(device->SetRenderState(D3DRS_LIGHTING,TRUE));
+                CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,D3DCULL_CW));
+                CHECK_HR(device->SetRenderState(D3DRS_ZENABLE,TRUE));
+                CHECK_HR(device->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE));
+                CHECK_HR(device->SetRenderState(D3DRS_TEXTUREFACTOR,0xff445566));
+                CHECK_HR(device->SetRenderState(D3DRS_ALPHAREF,0x77));
+                CHECK_HR(device->SetRenderState(D3DRS_FILLMODE,D3DFILL_WIREFRAME));
+                CHECK_HR(device->SetRenderState(unnamed,2));
+                CHECK_HR(device->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_LINEAR));
+                CHECK_HR(device->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP));
+                CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_MODULATE));
+                CHECK_HR(device->SetTextureStageState(0,D3DTSS_TEXCOORDINDEX,1));
+                CHECK_HR(device->SetTextureStageState(2,D3DTSS_ALPHAARG2,D3DTA_TFACTOR));
+                CHECK_HR(device->SetVertexShaderConstantF(20,vc20B,1));
+                CHECK_HR(device->SetPixelShaderConstantF(7,pc7B,1));
+                CHECK_HR(device->SetTransform(D3DTS_WORLD,&worldB));
+                CHECK_HR(device->SetTransform(D3DTS_VIEW,&viewB));
+                CHECK_HR(device->SetTransform(D3DTS_PROJECTION,&projectionB));
+                CHECK_HR(device->SetMaterial(&materialB));
+                // B really is B before the block is applied.
+                CHECK(fvfOf()==fvf1&&declOf()==declA&&vsOf()==vsPass&&psOf()==psC0);
+                CHECK_HR(all->Apply());
+                UINT offset=0,strideBack=0;
+                CHECK(streamOf(0,&offset,&strideBack)==red&&offset==0&&strideBack==stride);
+                CHECK(streamOf(1,&offset,&strideBack)==nullptr&&offset==0&&strideBack==0);
+                CHECK(indicesOf()==ibA);
+                CHECK(texOf(0)==baseA&&texOf(3)==nullptr);
+                CHECK(fvfOf()==fvf0&&declOf()==nullptr);
+                CHECK(vsOf()==nullptr&&psOf()==nullptr);
+                CHECK(rs(D3DRS_LIGHTING)==FALSE&&rs(D3DRS_CULLMODE)==D3DCULL_NONE&&rs(D3DRS_ZENABLE)==FALSE);
+                CHECK(rs(D3DRS_ALPHABLENDENABLE)==FALSE&&rs(D3DRS_COLORWRITEENABLE)==0xF);
+                CHECK(rs(D3DRS_SCISSORTESTENABLE)==FALSE&&rs(D3DRS_TEXTUREFACTOR)==0xff112233);
+                CHECK(rs(D3DRS_ALPHAREF)==0x10&&rs(D3DRS_FILLMODE)==D3DFILL_SOLID&&rs(unnamed)==1);
+                CHECK(ss(0,D3DSAMP_MINFILTER)==D3DTEXF_POINT&&ss(5,D3DSAMP_ADDRESSU)==D3DTADDRESS_WRAP);
+                CHECK(ts(0,D3DTSS_COLOROP)==D3DTOP_SELECTARG1&&ts(0,D3DTSS_TEXCOORDINDEX)==0);
+                CHECK(ts(2,D3DTSS_ALPHAARG2)==D3DTA_CURRENT);
+                CHECK(vsConst(20)==1.0f&&psConst(7)==5.0f);
+                CHECK(sameViewport(viewportOf(),vpA)&&sameRect(scissorOf(),scissorA));
+                CHECK(sameMatrix(transformOf(D3DTS_WORLD),worldA)&&sameMatrix(transformOf(D3DTS_VIEW),viewA));
+                CHECK(sameMatrix(transformOf(D3DTS_PROJECTION),projectionA));
+                CHECK(diffuseOf().Diffuse.r==1.0f&&diffuseOf().Diffuse.g==0.0f&&diffuseOf().Diffuse.a==1.0f);
+                CHECK(drawAndRead(device,target,staging,32,32)==0xff0000);   // red again
+                // Apply is repeatable and leaves the device as it found it.
+                CHECK_HR(all->Apply());
+                CHECK(texOf(0)==baseA&&indicesOf()==ibA&&fvfOf()==fvf0);
+                all->Release();
+            }
+
+            // ------------------------------ D3DSBT_PIXELSTATE / D3DSBT_VERTEXSTATE
+            // Two halves of the device's state that are set independently; each
+            // block must put back its own half and nothing of the other, and
+            // what neither covers (streams, indices, viewport, ...) never moves.
+            const DWORD dwF0=fvf0,dwF1=fvf1;
+            auto setPixel=[&](unsigned w){
+                CHECK_HR(device->SetRenderState(D3DRS_ALPHAREF,w?0x99:0x20));
+                CHECK_HR(device->SetRenderState(D3DRS_TEXTUREFACTOR,w?0xff0a0b0c:0xff010203));
+                CHECK_HR(device->SetRenderState(D3DRS_ZFUNC,w?D3DCMP_GREATER:D3DCMP_LESS));
+                CHECK_HR(device->SetRenderState(D3DRS_ALPHABLENDENABLE,w?TRUE:FALSE));
+                CHECK_HR(device->SetSamplerState(0,D3DSAMP_ADDRESSU,w?D3DTADDRESS_CLAMP:D3DTADDRESS_MIRROR));
+                CHECK_HR(device->SetSamplerState(2,D3DSAMP_MAGFILTER,w?D3DTEXF_LINEAR:D3DTEXF_POINT));
+                CHECK_HR(device->SetTextureStageState(0,D3DTSS_COLOROP,w?D3DTOP_SUBTRACT:D3DTOP_ADD));
+                CHECK_HR(device->SetPixelShader(w?psC1:psC0));
+                const float c3[4]={w?9.0f:1.0f,0,0,0},c200[4]={w?4.0f:3.0f,0,0,0};
+                CHECK_HR(device->SetPixelShaderConstantF(3,c3,1));
+                CHECK_HR(device->SetPixelShaderConstantF(200,c200,1));
+            };
+            auto checkPixel=[&](unsigned w){
+                CHECK(rs(D3DRS_ALPHAREF)==(w?0x99u:0x20u));
+                CHECK(rs(D3DRS_TEXTUREFACTOR)==(w?0xff0a0b0cu:0xff010203u));
+                CHECK(rs(D3DRS_ZFUNC)==DWORD(w?D3DCMP_GREATER:D3DCMP_LESS));
+                CHECK(rs(D3DRS_ALPHABLENDENABLE)==DWORD(w?TRUE:FALSE));
+                CHECK(ss(0,D3DSAMP_ADDRESSU)==DWORD(w?D3DTADDRESS_CLAMP:D3DTADDRESS_MIRROR));
+                CHECK(ss(2,D3DSAMP_MAGFILTER)==DWORD(w?D3DTEXF_LINEAR:D3DTEXF_POINT));
+                CHECK(ts(0,D3DTSS_COLOROP)==DWORD(w?D3DTOP_SUBTRACT:D3DTOP_ADD));
+                CHECK(psOf()==(w?psC1:psC0));
+                CHECK(psConst(3)==(w?9.0f:1.0f)&&psConst(200)==(w?4.0f:3.0f));
+            };
+            auto setVertex=[&](unsigned w){
+                CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,w?D3DCULL_CCW:D3DCULL_CW));
+                CHECK_HR(device->SetRenderState(D3DRS_LIGHTING,w?TRUE:FALSE));
+                CHECK_HR(device->SetRenderState(D3DRS_AMBIENT,w?0xff808080:0xff112233));
+                CHECK_HR(device->SetVertexShader(w?vsOffset:vsPass));
+                const float c3[4]={w?8.0f:2.0f,0,0,0},c250[4]={w?6.0f:5.0f,0,0,0};
+                CHECK_HR(device->SetVertexShaderConstantF(3,c3,1));
+                CHECK_HR(device->SetVertexShaderConstantF(250,c250,1));
+                // State 0 is a declaration over an FVF; state 1 is the FVF alone.
+                CHECK_HR(device->SetFVF(w?dwF1:dwF0));
+                if(!w)CHECK_HR(device->SetVertexDeclaration(declA));
+            };
+            auto checkVertex=[&](unsigned w){
+                CHECK(rs(D3DRS_CULLMODE)==DWORD(w?D3DCULL_CCW:D3DCULL_CW));
+                CHECK(rs(D3DRS_LIGHTING)==DWORD(w?TRUE:FALSE));
+                CHECK(rs(D3DRS_AMBIENT)==(w?0xff808080u:0xff112233u));
+                CHECK(vsOf()==(w?vsOffset:vsPass));
+                CHECK(vsConst(3)==(w?8.0f:2.0f)&&vsConst(250)==(w?6.0f:5.0f));
+                CHECK(fvfOf()==(w?dwF1:dwF0)&&declOf()==(w?nullptr:declA));
+            };
+            // Listed under both halves: either block puts it back.
+            auto setShared=[&](unsigned w){
+                CHECK_HR(device->SetRenderState(D3DRS_SHADEMODE,w?D3DSHADE_FLAT:D3DSHADE_GOURAUD));
+                CHECK_HR(device->SetRenderState(D3DRS_FOGCOLOR,w?0xff00ff00:0xffff0000));
+                CHECK_HR(device->SetTextureStageState(1,D3DTSS_TEXCOORDINDEX,w?3:2));
+                CHECK_HR(device->SetTextureStageState(1,D3DTSS_TEXTURETRANSFORMFLAGS,
+                    w?D3DTTFF_COUNT3:D3DTTFF_COUNT2));
+            };
+            auto checkShared=[&](unsigned w){
+                CHECK(rs(D3DRS_SHADEMODE)==DWORD(w?D3DSHADE_FLAT:D3DSHADE_GOURAUD));
+                CHECK(rs(D3DRS_FOGCOLOR)==(w?0xff00ff00u:0xffff0000u));
+                CHECK(ts(1,D3DTSS_TEXCOORDINDEX)==(w?3u:2u));
+                CHECK(ts(1,D3DTSS_TEXTURETRANSFORMFLAGS)==DWORD(w?D3DTTFF_COUNT3:D3DTTFF_COUNT2));
+            };
+            // In neither half: only D3DSBT_ALL covers these (including bound textures).
+            auto setOther=[&](unsigned w){
+                CHECK_HR(device->SetTexture(0,w?texB:texA));
+                CHECK_HR(device->SetTexture(4,w?texA:nullptr));
+                CHECK_HR(device->SetStreamSource(0,w?blue:red,w?4:0,stride));
+                CHECK_HR(device->SetIndices(w?ibB:ibA));
+                CHECK_HR(device->SetViewport(w?&vpB:&vpA));
+                CHECK_HR(device->SetScissorRect(w?&scissorB:&scissorA));
+                CHECK_HR(device->SetTransform(D3DTS_WORLD,w?&worldB:&worldA));
+                CHECK_HR(device->SetMaterial(w?&materialB:&materialA));
+                CHECK_HR(device->SetRenderState(unnamed,w?2:1));
+            };
+            auto checkOther=[&](unsigned w){
+                UINT offset=0,strideBack=0;
+                CHECK(texOf(0)==(w?baseB:baseA));
+                CHECK(texOf(4)==(w?baseA:nullptr));
+                CHECK(streamOf(0,&offset,&strideBack)==(w?blue:red)&&offset==(w?4u:0u)&&strideBack==stride);
+                CHECK(indicesOf()==(w?ibB:ibA));
+                CHECK(sameViewport(viewportOf(),w?vpB:vpA)&&sameRect(scissorOf(),w?scissorB:scissorA));
+                CHECK(sameMatrix(transformOf(D3DTS_WORLD),w?worldB:worldA));
+                CHECK(diffuseOf().Diffuse.g==(w?1.0f:0.0f));
+                CHECK(rs(unnamed)==(w?2u:1u));
+            };
+            setPixel(0);setVertex(0);setShared(0);setOther(0);
+            IDirect3DStateBlock9* pixelBlock=nullptr;
+            IDirect3DStateBlock9* vertexBlock=nullptr;
+            CHECK_HR(device->CreateStateBlock(D3DSBT_PIXELSTATE,&pixelBlock));
+            CHECK_HR(device->CreateStateBlock(D3DSBT_VERTEXSTATE,&vertexBlock));
+            if(pixelBlock&&vertexBlock) {
+                setPixel(1);setVertex(1);setShared(1);setOther(1);
+                CHECK_HR(pixelBlock->Apply());
+                checkPixel(0);checkVertex(1);checkShared(0);checkOther(1);
+                CHECK_HR(vertexBlock->Apply());
+                checkPixel(0);checkVertex(0);checkShared(0);checkOther(1);
+                // The other order, and the shared states from the other side.
+                setPixel(1);setVertex(1);setShared(1);
+                CHECK_HR(vertexBlock->Apply());
+                checkPixel(1);checkVertex(0);checkShared(0);checkOther(1);
+                setShared(1);
+                CHECK_HR(pixelBlock->Apply());
+                checkPixel(0);checkVertex(0);checkShared(0);checkOther(1);
+                // Capture re-reads only this block's half: the pixel block takes
+                // pixel state 1 while the vertex state is 0 and changes after.
+                setPixel(1);setVertex(0);setShared(1);
+                CHECK_HR(pixelBlock->Capture());
+                setPixel(0);setVertex(1);setShared(0);
+                CHECK_HR(pixelBlock->Apply());
+                checkPixel(1);checkVertex(1);checkShared(1);checkOther(1);
+            }
+            if(pixelBlock)pixelBlock->Release();
+            if(vertexBlock)vertexBlock->Release();
+
+            // --------------------------- shader state through a real draw
+            // vs: add oPos,v0,c0 (c0.x moves the triangle off screen); ps: the
+            // colour in c0. Both halves are proven by the pixel they produce.
+            CHECK_HR(device->SetFVF(0));
+            CHECK_HR(device->SetVertexDeclaration(declA));
+            CHECK_HR(device->SetStreamSource(0,clip,0,3*sizeof(float)));
+            CHECK_HR(device->SetStreamSource(1,nullptr,0,0));
+            CHECK_HR(device->SetViewport(&vpA));
+            CHECK_HR(device->SetScissorRect(&scissorA));
+            CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));
+            CHECK_HR(device->SetRenderState(D3DRS_ZENABLE,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE));
+            CHECK_HR(device->SetRenderState(D3DRS_COLORWRITEENABLE,0xF));
+            CHECK_HR(device->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE));
+            CHECK_HR(device->SetVertexShader(vsOffset));
+            CHECK_HR(device->SetPixelShader(psC0));
+            const float zero[4]={0,0,0,0},away[4]={5,0,0,0};
+            const float redC[4]={1,0,0,1},greenC[4]={0,1,0,1},blueC[4]={0,0,1,1};
+            CHECK_HR(device->SetVertexShaderConstantF(0,zero,1));
+            CHECK_HR(device->SetPixelShaderConstantF(0,redC,1));
+            CHECK(drawAndRead(device,target,staging,32,32)==0xff0000);
+            IDirect3DStateBlock9* shaderPixel=nullptr;
+            IDirect3DStateBlock9* shaderVertex=nullptr;
+            CHECK_HR(device->CreateStateBlock(D3DSBT_PIXELSTATE,&shaderPixel));
+            CHECK_HR(device->CreateStateBlock(D3DSBT_VERTEXSTATE,&shaderVertex));
+            if(shaderPixel&&shaderVertex) {
+                CHECK_HR(device->SetPixelShaderConstantF(0,greenC,1));
+                CHECK(drawAndRead(device,target,staging,32,32)==0x00ff00);
+                CHECK_HR(device->SetVertexShaderConstantF(0,away,1));
+                CHECK(drawAndRead(device,target,staging,32,32)==0x000000);   // moved off the target
+                // The pixel block restores the colour; the geometry stays away.
+                CHECK_HR(shaderPixel->Apply());
+                CHECK(drawAndRead(device,target,staging,32,32)==0x000000);
+                // The vertex block brings the geometry back, in the restored red.
+                CHECK_HR(shaderVertex->Apply());
+                CHECK(drawAndRead(device,target,staging,32,32)==0xff0000);
+                // The vertex block leaves the pixel colour alone.
+                CHECK_HR(device->SetPixelShaderConstantF(0,greenC,1));
+                CHECK_HR(shaderVertex->Apply());
+                CHECK(drawAndRead(device,target,staging,32,32)==0x00ff00);
+                CHECK_HR(shaderPixel->Apply());
+                CHECK(drawAndRead(device,target,staging,32,32)==0xff0000);
+                // Another pixel shader reading c1: the block puts shader c0 back.
+                CHECK_HR(device->SetPixelShader(psC1));
+                CHECK_HR(device->SetPixelShaderConstantF(1,blueC,1));
+                CHECK(drawAndRead(device,target,staging,32,32)==0x0000ff);
+                CHECK_HR(shaderPixel->Apply());
+                CHECK(psOf()==psC0);
+                CHECK(drawAndRead(device,target,staging,32,32)==0xff0000);
+                // Capture takes the colour now, not the one the block was made with.
+                CHECK_HR(device->SetPixelShaderConstantF(0,blueC,1));
+                CHECK_HR(shaderPixel->Capture());
+                CHECK_HR(device->SetPixelShaderConstantF(0,greenC,1));
+                CHECK(drawAndRead(device,target,staging,32,32)==0x00ff00);
+                CHECK_HR(shaderPixel->Apply());
+                CHECK(drawAndRead(device,target,staging,32,32)==0x0000ff);
+                // And the vertex block, captured with the geometry away.
+                CHECK_HR(device->SetVertexShaderConstantF(0,away,1));
+                CHECK_HR(shaderVertex->Capture());
+                CHECK_HR(device->SetVertexShaderConstantF(0,zero,1));
+                CHECK(drawAndRead(device,target,staging,32,32)==0x0000ff);
+                CHECK_HR(shaderVertex->Apply());
+                CHECK(drawAndRead(device,target,staging,32,32)==0x000000);
+            }
+            if(shaderPixel)shaderPixel->Release();
+            if(shaderVertex)shaderVertex->Release();
+
+            // --------------------------------- BeginStateBlock / EndStateBlock
+            CHECK_HR(device->SetVertexShader(nullptr));
+            CHECK_HR(device->SetPixelShader(nullptr));
+            CHECK_HR(device->SetFVF(fvf0));
+            CHECK_HR(device->SetVertexDeclaration(declA));
+            CHECK_HR(device->SetStreamSource(0,red,0,stride));
+            CHECK_HR(device->SetStreamSource(1,nullptr,0,0));
+            CHECK_HR(device->SetIndices(ibA));
+            CHECK_HR(device->SetTexture(0,texA));
+            CHECK_HR(device->SetTexture(1,nullptr));
+            CHECK_HR(device->SetRenderState(D3DRS_ALPHAREF,5));
+            CHECK_HR(device->SetRenderState(D3DRS_TEXTUREFACTOR,0xff000005));
+            CHECK_HR(device->SetRenderState(D3DRS_ALPHAFUNC,D3DCMP_ALWAYS));
+            CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,D3DCULL_CW));
+            CHECK_HR(device->SetSamplerState(1,D3DSAMP_MAGFILTER,D3DTEXF_POINT));
+            CHECK_HR(device->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT));
+            const float vc10A[4]={1,1,1,1},vc10B[4]={9,9,9,9},pc4A[4]={4,4,4,4};
+            CHECK_HR(device->SetVertexShaderConstantF(10,vc10A,1));
+            CHECK_HR(device->SetPixelShaderConstantF(4,pc4A,1));
+            CHECK_HR(device->SetViewport(&vpA));
+            CHECK_HR(device->SetScissorRect(&scissorA));
+            CHECK_HR(device->SetTransform(D3DTS_WORLD,&worldA));
+            CHECK_HR(device->SetTransform(D3DTS_VIEW,&viewA));
+            CHECK_HR(device->SetMaterial(&materialA));
+            const ULONG texARefs=refsOf(texA),texBRefs=refsOf(texB),blueRefs=refsOf(blue);
+            IDirect3DStateBlock9* recorded=nullptr;
+            CHECK_HR(device->BeginStateBlock());
+            CHECK(refsOf(device)==blockBase);   // a recording holds no reference on the device
+            CHECK_HR_IS(device->BeginStateBlock(),D3DERR_INVALIDCALL);
+            IDirect3DStateBlock9* refused=reinterpret_cast<IDirect3DStateBlock9*>(device);
+            CHECK_HR_IS(device->CreateStateBlock(D3DSBT_ALL,&refused),D3DERR_INVALIDCALL);
+            CHECK(refused==nullptr);
+            // Arguments are still validated while recording.
+            CHECK_HR_IS(device->SetRenderState(D3DRENDERSTATETYPE(256),1),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(device->SetTexture(16,nullptr),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(device->SetStreamSource(16,nullptr,0,0),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(device->SetViewport(nullptr),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(device->SetVertexShaderConstantF(255,vc10B,2),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(device->SetTransform(D3DTS_WORLD,nullptr),D3DERR_INVALIDCALL);
+            // The recorded calls.
+            CHECK_HR(device->SetRenderState(D3DRS_ALPHAREF,77));
+            CHECK_HR(device->SetRenderState(D3DRS_TEXTUREFACTOR,0xff00ff00));
+            CHECK_HR(device->SetTexture(0,texA));   // recorded twice: the second wins
+            CHECK_HR(device->SetTexture(0,texB));
+            CHECK_HR(device->SetSamplerState(1,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR));
+            CHECK_HR(device->SetVertexShaderConstantF(10,vc10B,1));
+            CHECK_HR(device->SetStreamSource(1,blue,4,20));
+            CHECK_HR(device->SetViewport(&vpB));
+            CHECK_HR(device->SetScissorRect(&scissorB));
+            CHECK_HR(device->SetTransform(D3DTS_WORLD,&worldB));
+            D3DMATRIX shift=worldA;shift._41=2.0f;
+            CHECK_HR(device->MultiplyTransform(D3DTS_VIEW,&shift));
+            CHECK_HR(device->SetMaterial(&materialB));
+            CHECK_HR(device->SetFVF(fvf1));
+            // Nothing above reached the device.
+            CHECK(rs(D3DRS_ALPHAREF)==5&&rs(D3DRS_TEXTUREFACTOR)==0xff000005);
+            CHECK(texOf(0)==baseA&&ss(1,D3DSAMP_MAGFILTER)==D3DTEXF_POINT&&vsConst(10)==1.0f);
+            UINT recOffset=0,recStride=0;
+            CHECK(streamOf(1,&recOffset,&recStride)==nullptr);
+            CHECK(sameViewport(viewportOf(),vpA)&&sameRect(scissorOf(),scissorA));
+            CHECK(sameMatrix(transformOf(D3DTS_WORLD),worldA)&&sameMatrix(transformOf(D3DTS_VIEW),viewA));
+            CHECK(diffuseOf().Diffuse.r==1.0f&&fvfOf()==fvf0&&declOf()==declA);
+            // The block holds what it recorded: texB and blue, and not the
+            // texA it recorded first and replaced.
+            CHECK(refsOf(texB)==texBRefs+1&&refsOf(blue)==blueRefs+1&&refsOf(texA)==texARefs);
+            // A null result pointer is refused and recording carries on.
+            CHECK_HR_IS(device->EndStateBlock(nullptr),D3DERR_INVALIDCALL);
+            CHECK_HR_IS(device->BeginStateBlock(),D3DERR_INVALIDCALL);
+            CHECK_HR(device->EndStateBlock(&recorded));
+            CHECK(recorded!=nullptr);
+            CHECK(refsOf(device)==blockBase+1);
+            IDirect3DStateBlock9* again=recorded;
+            CHECK_HR_IS(device->EndStateBlock(&again),D3DERR_INVALIDCALL);
+            CHECK(again==nullptr);
+            CHECK_HR_IS(device->EndStateBlock(nullptr),D3DERR_INVALIDCALL);
+            if(recorded) {
+                // States the block did not record, set differently on the device.
+                CHECK_HR(device->SetRenderState(D3DRS_ALPHAFUNC,D3DCMP_NEVER));
+                CHECK_HR(device->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));
+                CHECK_HR(device->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_LINEAR));
+                CHECK_HR(device->SetTexture(1,texB));
+                CHECK_HR(device->SetStreamSource(0,blue,0,stride));
+                const float pc4B[4]={6,6,6,6};
+                CHECK_HR(device->SetPixelShaderConstantF(4,pc4B,1));
+                CHECK_HR(recorded->Apply());
+                CHECK(rs(D3DRS_ALPHAREF)==77&&rs(D3DRS_TEXTUREFACTOR)==0xff00ff00);
+                CHECK(texOf(0)==baseB&&ss(1,D3DSAMP_MAGFILTER)==D3DTEXF_LINEAR&&vsConst(10)==9.0f);
+                CHECK(streamOf(1,&recOffset,&recStride)==blue&&recOffset==4&&recStride==20);
+                CHECK(sameViewport(viewportOf(),vpB)&&sameRect(scissorOf(),scissorB));
+                CHECK(sameMatrix(transformOf(D3DTS_WORLD),worldB));
+                CHECK(transformOf(D3DTS_VIEW)._41==2.0f&&transformOf(D3DTS_VIEW)._11==1.0f);   // viewA x shift
+                CHECK(diffuseOf().Diffuse.g==1.0f&&fvfOf()==fvf1&&declOf()==nullptr);
+                // ...and nothing it did not.
+                CHECK(rs(D3DRS_ALPHAFUNC)==D3DCMP_NEVER&&rs(D3DRS_CULLMODE)==D3DCULL_NONE);
+                CHECK(ss(2,D3DSAMP_MINFILTER)==D3DTEXF_LINEAR&&texOf(1)==baseB&&psConst(4)==6.0f);
+                CHECK(streamOf(0,&recOffset,&recStride)==blue);
+                CHECK(sameMatrix(transformOf(D3DTS_PROJECTION),projectionA)&&indicesOf()==ibA);
+                // Capture re-reads the recorded subset only.
+                CHECK_HR(device->SetRenderState(D3DRS_ALPHAREF,1));
+                CHECK_HR(device->SetTexture(0,texA));
+                const float vc10C[4]={2,2,2,2};
+                CHECK_HR(device->SetVertexShaderConstantF(10,vc10C,1));
+                CHECK_HR(device->SetStreamSource(1,red,0,16));
+                CHECK_HR(device->SetViewport(&vpA));
+                CHECK_HR(device->SetFVF(fvf2));
+                CHECK_HR(device->SetTransform(D3DTS_WORLD,&worldA));
+                CHECK_HR(device->SetRenderState(D3DRS_ALPHAFUNC,D3DCMP_ALWAYS));
+                CHECK_HR(device->SetTexture(1,nullptr));
+                CHECK_HR(device->SetStreamSource(0,red,0,stride));
+                CHECK_HR(recorded->Capture());
+                CHECK_HR(device->SetRenderState(D3DRS_ALPHAREF,2));
+                CHECK_HR(device->SetTexture(0,nullptr));
+                CHECK_HR(device->SetVertexShaderConstantF(10,vc10B,1));
+                CHECK_HR(device->SetStreamSource(1,nullptr,0,0));
+                CHECK_HR(device->SetViewport(&vpB));
+                CHECK_HR(device->SetFVF(fvf3));
+                CHECK_HR(device->SetTransform(D3DTS_WORLD,&worldB));
+                CHECK_HR(device->SetRenderState(D3DRS_ALPHAFUNC,D3DCMP_GREATER));
+                CHECK_HR(device->SetTexture(1,texA));
+                CHECK_HR(device->SetStreamSource(0,nullptr,0,0));
+                CHECK_HR(recorded->Apply());
+                CHECK(rs(D3DRS_ALPHAREF)==1&&texOf(0)==baseA&&vsConst(10)==2.0f);
+                CHECK(streamOf(1,&recOffset,&recStride)==red&&recOffset==0&&recStride==16);
+                CHECK(sameViewport(viewportOf(),vpA)&&fvfOf()==fvf2&&sameMatrix(transformOf(D3DTS_WORLD),worldA));
+                CHECK(rs(D3DRS_ALPHAFUNC)==D3DCMP_GREATER&&texOf(1)==baseA);
+                CHECK(streamOf(0,&recOffset,&recStride)==nullptr);
+                recorded->Release();
+            }
+            CHECK(refsOf(device)==blockBase);
+
+            // --------------------------------------- lifetime and error paths
+            IDirect3DStateBlock9* probe=nullptr;
+            CHECK_HR(device->CreateStateBlock(D3DSBT_PIXELSTATE,&probe));
+            if(probe) {
+                CHECK(refsOf(device)==blockBase+1);   // the block holds its device
+                IDirect3DDevice9* got=nullptr;
+                CHECK_HR(probe->GetDevice(&got));
+                CHECK(got==static_cast<IDirect3DDevice9*>(device));
+                CHECK(refsOf(device)==blockBase+2);
+                if(got)got->Release();
+                CHECK_HR_IS(probe->GetDevice(nullptr),D3DERR_INVALIDCALL);
+                IUnknown* unknown=nullptr;
+                IDirect3DStateBlock9* same=nullptr;
+                void* wrong=reinterpret_cast<void*>(probe);
+                CHECK_HR(probe->QueryInterface(__uuidof(IUnknown),reinterpret_cast<void**>(&unknown)));
+                CHECK_HR(probe->QueryInterface(__uuidof(IDirect3DStateBlock9),reinterpret_cast<void**>(&same)));
+                CHECK(same==probe);
+                CHECK_HR_IS(probe->QueryInterface(__uuidof(IDirect3DDevice9),&wrong),E_NOINTERFACE);
+                CHECK(wrong==nullptr);
+                CHECK_HR_IS(probe->QueryInterface(__uuidof(IUnknown),nullptr),E_POINTER);
+                if(unknown)unknown->Release();
+                if(same)same->Release();
+                // While the device records, a finished block can be neither
+                // applied nor captured.
+                CHECK_HR(device->BeginStateBlock());
+                CHECK_HR_IS(probe->Apply(),D3DERR_INVALIDCALL);
+                CHECK_HR_IS(probe->Capture(),D3DERR_INVALIDCALL);
+                IDirect3DStateBlock9* abandoned=nullptr;
+                CHECK_HR(device->EndStateBlock(&abandoned));
+                if(abandoned)abandoned->Release();
+                CHECK_HR(probe->Apply());
+                probe->Release();
+            }
+            CHECK(refsOf(device)==blockBase);
+            IDirect3DStateBlock9* rejected=nullptr;
+            CHECK_HR_IS(device->CreateStateBlock(D3DSBT_ALL,nullptr),D3DERR_INVALIDCALL);
+            const D3DSTATEBLOCKTYPE badTypes[]={D3DSTATEBLOCKTYPE(0),D3DSTATEBLOCKTYPE(4),
+                D3DSTATEBLOCKTYPE(99),D3DSTATEBLOCKTYPE(0x7fffffff)};
+            for(D3DSTATEBLOCKTYPE type:badTypes) {
+                rejected=reinterpret_cast<IDirect3DStateBlock9*>(device);   // must be reset to null
+                CHECK_HR_IS(device->CreateStateBlock(type,&rejected),D3DERR_INVALIDCALL);
+                CHECK(rejected==nullptr);
+            }
+            rejected=reinterpret_cast<IDirect3DStateBlock9*>(device);
+            CHECK_HR_IS(device->EndStateBlock(&rejected),D3DERR_INVALIDCALL);   // never began
+            CHECK(rejected==nullptr);
+
+            // A block holds what it captured with a reference of its own, so the
+            // objects outlive both the guest's release and the device unbinding
+            // them, and a block that outlives its device binding still works.
+            {
+                IDirect3DTexture9* life=nullptr;
+                IDirect3DVertexBuffer9* lifeVb=colourTriangle(device,0xff00ff00);
+                IDirect3DIndexBuffer9* lifeIb=nullptr;
+                IDirect3DVertexShader9* lifeVs=nullptr;
+                IDirect3DPixelShader9* lifePs=nullptr;
+                IDirect3DVertexDeclaration9* lifeDecl=nullptr;
+                CHECK_HR(device->CreateTexture(2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&life,nullptr));
+                CHECK_HR(device->CreateIndexBuffer(12,D3DUSAGE_WRITEONLY,D3DFMT_INDEX16,D3DPOOL_MANAGED,&lifeIb,nullptr));
+                CHECK_HR(device->CreateVertexShader(passVs,&lifeVs));
+                CHECK_HR(device->CreatePixelShader(constantPs0,&lifePs));
+                CHECK_HR(device->CreateVertexDeclaration(positionOnly,&lifeDecl));
+                if(life&&lifeVb&&lifeIb&&lifeVs&&lifePs&&lifeDecl) {
+                    CHECK_HR(device->SetTexture(6,life));
+                    CHECK_HR(device->SetStreamSource(2,lifeVb,0,stride));
+                    CHECK_HR(device->SetIndices(lifeIb));
+                    CHECK_HR(device->SetVertexShader(lifeVs));
+                    CHECK_HR(device->SetPixelShader(lifePs));
+                    CHECK_HR(device->SetVertexDeclaration(lifeDecl));
+                    IUnknown* held[]={life,lifeVb,lifeIb,lifeVs,lifePs,lifeDecl};
+                    for(IUnknown* object:held)CHECK(refsOf(object)==2);   // the guest and the device
+                    IDirect3DStateBlock9* keeper=nullptr;
+                    CHECK_HR(device->CreateStateBlock(D3DSBT_ALL,&keeper));
+                    if(keeper) {
+                        for(IUnknown* object:held)CHECK(refsOf(object)==3);   // and the block
+                        CHECK_HR(device->SetTexture(6,nullptr));
+                        CHECK_HR(device->SetStreamSource(2,nullptr,0,0));
+                        CHECK_HR(device->SetIndices(nullptr));
+                        CHECK_HR(device->SetVertexShader(nullptr));
+                        CHECK_HR(device->SetPixelShader(nullptr));
+                        CHECK_HR(device->SetVertexDeclaration(nullptr));
+                        for(IUnknown* object:held)CHECK(refsOf(object)==2);
+                        life->Release();lifeVb->Release();lifeIb->Release();
+                        lifeVs->Release();lifePs->Release();lifeDecl->Release();
+                        // Only the block is left holding them: still alive.
+                        for(IUnknown* object:held)CHECK(refsOf(object)==1);
+                        CHECK_HR(keeper->Apply());
+                        for(IUnknown* object:held)CHECK(refsOf(object)==2);
+                        CHECK(texOf(6)==static_cast<IDirect3DBaseTexture9*>(life)&&indicesOf()==lifeIb);
+                        CHECK(life->GetLevelCount()==1);   // a live object, not a dangling one
+                        keeper->Release();
+                        for(IUnknown* object:held)CHECK(refsOf(object)==1);   // the device's alone
+                    } else {
+                        life->Release();lifeVb->Release();lifeIb->Release();
+                        lifeVs->Release();lifePs->Release();lifeDecl->Release();
+                    }
+                    CHECK_HR(device->SetTexture(6,nullptr));
+                    CHECK_HR(device->SetStreamSource(2,nullptr,0,0));
+                    CHECK_HR(device->SetIndices(nullptr));
+                    CHECK_HR(device->SetVertexShader(nullptr));
+                    CHECK_HR(device->SetPixelShader(nullptr));
+                    CHECK_HR(device->SetVertexDeclaration(nullptr));
+                }
+            }
+            // Capture drops the reference to what it replaces, D3DSBT_PIXELSTATE
+            // does not capture bound textures, and a recording that is abandoned
+            // along with its block drops what it held.
+            {
+                IDirect3DTexture9* swapped=nullptr;
+                CHECK_HR(device->CreateTexture(2,2,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&swapped,nullptr));
+                if(swapped) {
+                    CHECK_HR(device->SetTexture(7,swapped));
+                    IDirect3DStateBlock9* pixelNoTex=nullptr;
+                    CHECK_HR(device->CreateStateBlock(D3DSBT_PIXELSTATE,&pixelNoTex));
+                    CHECK(refsOf(swapped)==2);   // guest and device only; pixel block does not hold textures
+                    if(pixelNoTex)pixelNoTex->Release();
+                    IDirect3DStateBlock9* holder=nullptr;
+                    CHECK_HR(device->CreateStateBlock(D3DSBT_ALL,&holder));
+                    CHECK(refsOf(swapped)==3);   // guest, device, block
+                    CHECK_HR(device->SetTexture(7,nullptr));
+                    if(holder) {
+                        CHECK_HR(holder->Capture());   // now holds the empty slot
+                        CHECK(refsOf(swapped)==1);
+                        holder->Release();
+                    }
+                    CHECK_HR(device->BeginStateBlock());
+                    CHECK_HR(device->SetTexture(7,swapped));
+                    CHECK(refsOf(swapped)==2);   // the recording holds it
+                    // Integer wrap-around on constant register range must be rejected (recording and live).
+                    const float dummy[4]={1,2,3,4};
+                    CHECK_HR_IS(device->SetVertexShaderConstantF(0xffffffffu,dummy,2),D3DERR_INVALIDCALL);
+                    CHECK_HR_IS(device->SetPixelShaderConstantF(0xffffffffu,dummy,2),D3DERR_INVALIDCALL);
+                    IDirect3DStateBlock9* made=nullptr;
+                    CHECK_HR(device->EndStateBlock(&made));
+                    CHECK(refsOf(swapped)==2);
+                    if(made)made->Release();
+                    CHECK(refsOf(swapped)==1);
+                    CHECK_HR_IS(device->SetVertexShaderConstantF(0xffffffffu,dummy,2),D3DERR_INVALIDCALL);
+                    CHECK_HR_IS(device->SetPixelShaderConstantF(0xffffffffu,dummy,2),D3DERR_INVALIDCALL);
+                    swapped->Release();
+                }
+            }
+            // Leave the device the way the later sections expect it.
+            CHECK_HR(device->SetTexture(0,nullptr));
+            CHECK_HR(device->SetTexture(1,nullptr));
+            CHECK_HR(device->SetTexture(3,nullptr));
+            CHECK_HR(device->SetTexture(4,nullptr));
+            CHECK_HR(device->SetStreamSource(0,nullptr,0,0));
+            CHECK_HR(device->SetStreamSource(1,nullptr,0,0));
+            CHECK_HR(device->SetIndices(nullptr));
+            CHECK_HR(device->SetVertexShader(nullptr));
+            CHECK_HR(device->SetPixelShader(nullptr));
+            CHECK_HR(device->SetVertexDeclaration(nullptr));
+            CHECK_HR(device->SetRenderTarget(0,backBuffer));
+        }
+        if(declA)declA->Release();
+        if(psC1)psC1->Release();
+        if(psC0)psC0->Release();
+        if(vsOffset)vsOffset->Release();
+        if(vsPass)vsPass->Release();
+        if(ibB)ibB->Release();
+        if(ibA)ibA->Release();
+        if(texB)texB->Release();
+        if(texA)texA->Release();
+        if(clip)clip->Release();
+        if(blue)blue->Release();
+        if(red)red->Release();
+        if(staging)staging->Release();
+        if(target)target->Release();
+        CHECK(refsOf(device)==blockBase);
+    }
+
     // A query outlives a Reset: it holds the device and its context, which Reset
-    // keeps.
+    // keeps. An open state-block recording is dropped by Reset.
     IDirect3DQuery9* survivor=nullptr;
     CHECK_HR(device->CreateQuery(D3DQUERYTYPE_EVENT,&survivor));
     CHECK(refsOf(device)==deviceRefs+1);
+    CHECK_HR(device->BeginStateBlock());
 
     // Reset rebuilds the swap chain, as D3D9 documents.
     CHECK_HR(device->Reset(&present));
+    {
+        IDirect3DStateBlock9* afterResetBlock=nullptr;
+        CHECK_HR_IS(device->EndStateBlock(&afterResetBlock),D3DERR_INVALIDCALL);
+        CHECK(afterResetBlock==nullptr);
+    }
     if(survivor) {
         BOOL signalled=FALSE;
         CHECK_HR(survivor->Issue(D3DISSUE_END));
