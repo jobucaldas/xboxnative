@@ -19,6 +19,8 @@ using PulseEventFn = SetEventFn;
 using ReleaseMutexFn = SetEventFn;
 using ReleaseSemaphoreFn = BOOL (WINAPI*)(HANDLE,LONG,LPLONG);
 using WaitFn = DWORD (WINAPI*)(HANDLE,DWORD);
+using WaitMultipleFn = DWORD (WINAPI*)(DWORD,CONST HANDLE*,BOOL,DWORD);
+using WaitMultipleExFn = DWORD (WINAPI*)(DWORD,CONST HANDLE*,BOOL,DWORD,BOOL);
 static_assert(std::is_same<decltype(&CreateEventA),CreateEventFn>::value);
 static_assert(std::is_same<decltype(&CreateEventW),CreateEventWFn>::value);
 static_assert(std::is_same<decltype(&OpenEventW),OpenEventWFn>::value);
@@ -35,9 +37,14 @@ static_assert(std::is_same<decltype(&PulseEvent),PulseEventFn>::value);
 static_assert(std::is_same<decltype(&ReleaseMutex),ReleaseMutexFn>::value);
 static_assert(std::is_same<decltype(&ReleaseSemaphore),ReleaseSemaphoreFn>::value);
 static_assert(std::is_same<decltype(&WaitForSingleObject),WaitFn>::value);
+static_assert(std::is_same<decltype(&WaitForMultipleObjects),WaitMultipleFn>::value);
+static_assert(std::is_same<decltype(&WaitForMultipleObjectsEx),WaitMultipleExFn>::value);
 #else
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <mutex>
+#include <thread>
 #include "../host/x86/x86_guest.h"
 using namespace x86;
 static int checks, failures;
@@ -114,6 +121,347 @@ int main(){
  CHECK(call("sleepconditionvariablesrw",{cv,lock,10,0})==0);CHECK(call("getlasterror",{})==1460);call("releasesrwlockexclusive",{lock});
  body(0x31070,cv,th.add(reg.map.at({"kernel32.dll","wakeconditionvariable"})));call("createthread",{0,0,0x31070,0,0,0});
  call("acquiresrwlockexclusive",{lock});CHECK(call("sleepconditionvariablesrw",{cv,lock,0xffffffffu,0})==1);call("releasesrwlockexclusive",{lock});
+
+ // Native-backed notify events and WaitForMultipleObjects* contracts (#401 / #323).
+ {
+  struct MockNativeEvents {
+   struct State { bool manual = false; bool signaled = false; };
+   std::mutex mu;
+   std::condition_variable cv;
+   std::map<uintptr_t, State> events;
+   uintptr_t next_id = 0x9000u;
+   Host::NativeEventBackend backend() {
+    Host::NativeEventBackend b;
+    b.create = [this](bool manual, bool initial) -> uintptr_t {
+     std::lock_guard<std::mutex> lk(mu);
+     uintptr_t id = ++next_id;
+     events[id] = State{manual, initial};
+     return id;
+    };
+    b.close = [this](uintptr_t h) {
+     std::lock_guard<std::mutex> lk(mu);
+     events.erase(h);
+    };
+    b.set = [this](uintptr_t h) { set(h); };
+    b.reset = [this](uintptr_t h) {
+     std::lock_guard<std::mutex> lk(mu);
+     auto it = events.find(h);
+     if (it != events.end()) it->second.signaled = false;
+    };
+    b.pulse = [this](uintptr_t h) {
+     std::lock_guard<std::mutex> lk(mu);
+     auto it = events.find(h);
+     if (it != events.end()) it->second.signaled = false;
+    };
+    b.wait_multiple = [this](const uintptr_t* handles, uint32_t count, bool wait_all, uint32_t timeout) -> uint32_t {
+     std::unique_lock<std::mutex> lk(mu);
+     auto try_acquire = [&]() -> uint32_t {
+      for (uint32_t i = 0; i < count; ++i)
+       if (!events.count(handles[i])) return 0xffffffffu;
+      if (wait_all) {
+       for (uint32_t i = 0; i < count; ++i)
+        if (!events[handles[i]].signaled) return 258u;
+       for (uint32_t i = 0; i < count; ++i) {
+        auto& st = events[handles[i]];
+        if (!st.manual) st.signaled = false;
+       }
+       return 0u;
+      }
+      for (uint32_t i = 0; i < count; ++i) {
+       auto& st = events[handles[i]];
+       if (st.signaled) {
+        if (!st.manual) st.signaled = false;
+        return i;
+       }
+      }
+      return 258u;
+     };
+     uint32_t r = try_acquire();
+     if (r != 258u || timeout == 0u) return r;
+     if (timeout == 0xffffffffu) {
+      cv.wait(lk, [&]() { r = try_acquire(); return r != 258u; });
+      return r;
+     }
+     auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+     cv.wait_until(lk, dl, [&]() { r = try_acquire(); return r != 258u; });
+     return r;
+    };
+    return b;
+   }
+   void set(uintptr_t h) {
+    {
+     std::lock_guard<std::mutex> lk(mu);
+     auto it = events.find(h);
+     if (it != events.end()) it->second.signaled = true;
+    }
+    cv.notify_all();
+   }
+   bool is_signaled(uintptr_t h) {
+    std::lock_guard<std::mutex> lk(mu);
+    auto it = events.find(h);
+    return it != events.end() && it->second.signaled;
+   }
+  };
+  MockNativeEvents mock;
+  auto ucall = [&](const char* n, std::initializer_list<uint32_t> a) {
+   unsigned i = 0;
+   for (uint32_t v : a) mem.w32(cpu.reg[ESP] + 4 + 4 * i++, v);
+   return reg.map.at({"user32.dll", n}).fn(cpu);
+  };
+  const uint32_t arr = 0x3200;
+  auto put_handles = [&](std::initializer_list<uint32_t> hs) {
+   uint32_t i = 0;
+   for (uint32_t h : hs) mem.w32(arr + 4 * i++, h);
+  };
+
+  // Create guest-only events before enabling native backend so we can test mixed guest + native waits.
+  uint32_t g_auto_sig = call("createeventa", {0, 0, 1, 0});
+  uint32_t g_auto_unsig = call("createeventa", {0, 0, 0, 0});
+  CHECK(g_auto_sig != 0 && g_auto_unsig != 0);
+  CHECK(host.dsound_event(g_auto_sig) == 0);
+
+  host.native_events = mock.backend();
+  uint32_t n_auto1 = call("createeventa", {0, 0, 0, 0});
+  uint32_t n_auto2 = call("createeventa", {0, 0, 0, 0});
+  uint32_t n_manual = call("createeventa", {0, 1, 0, 0});
+  CHECK(n_auto1 != 0 && n_auto2 != 0 && n_manual != 0);
+  uintptr_t nh1 = host.dsound_event(n_auto1), nh2 = host.dsound_event(n_auto2), nhm = host.dsound_event(n_manual);
+  CHECK(nh1 != 0 && nh2 != 0 && nhm != 0);
+
+  // 1. Error & edge cases: count==0, count>64, NULL ptr, MsgWait count>63, invalid handle, duplicate handles on wait_all.
+  CHECK(call("waitformultipleobjects", {0, arr, 0, 0}) == 0xffffffffu && call("getlasterror", {}) == 87);
+  CHECK(call("waitformultipleobjects", {65, arr, 0, 0}) == 0xffffffffu && call("getlasterror", {}) == 87);
+  CHECK(call("waitformultipleobjects", {1, 0, 0, 0}) == 0xffffffffu && call("getlasterror", {}) == 87);
+  CHECK(ucall("msgwaitformultipleobjects", {64, arr, 0, 0, 0}) == 0xffffffffu && call("getlasterror", {}) == 87);
+
+  mock.set(nh1);
+  put_handles({n_auto1, 0xdeadbeefu});
+  CHECK(call("waitformultipleobjects", {2, arr, 0, 0}) == 0xffffffffu && call("getlasterror", {}) == 6);
+  CHECK(mock.is_signaled(nh1));  // invalid handle failure must not consume earlier signaled event
+
+  put_handles({n_auto1, n_auto1});
+  CHECK(call("waitformultipleobjects", {2, arr, 1, 0}) == 0xffffffffu && call("getlasterror", {}) == 87);
+  CHECK(mock.is_signaled(nh1));  // duplicate handle rejection on wait_all must not consume
+
+  CHECK(call("duplicatehandle", {0xffffffffu, n_auto1, 0xffffffffu, 0x3300, 0, 0, 2}) == 1);
+  uint32_t n_auto1_dup = mem.r32(0x3300);
+  CHECK(n_auto1_dup != 0 && n_auto1_dup != n_auto1);
+  put_handles({n_auto1, n_auto1_dup});
+  CHECK(call("waitformultipleobjects", {2, arr, 1, 0}) == 0xffffffffu && call("getlasterror", {}) == 87);
+  CHECK(mock.is_signaled(nh1));  // duplicated handles to same underlying object rejected on wait_all
+  // Duplicate handles ARE allowed on wait_all=FALSE and return lowest index, consuming once.
+  CHECK(call("waitformultipleobjects", {2, arr, 0, 0}) == 0);
+  CHECK(!mock.is_signaled(nh1));
+  CHECK(call("closehandle", {n_auto1_dup}) == 1);
+
+  // 2. Native notify event signaled externally (without setting guest SyncObject::signaled):
+  //    WaitForMultipleObjects, WaitForMultipleObjectsEx, MsgWaitForMultipleObjects, MsgWaitForMultipleObjectsEx.
+  mock.set(nh2);
+  put_handles({n_auto1, n_auto2});
+  CHECK(call("waitformultipleobjects", {2, arr, 0, 0}) == 1);
+  CHECK(!mock.is_signaled(nh2));
+  CHECK(call("waitformultipleobjects", {2, arr, 0, 0}) == 258);
+
+  mock.set(nh2);
+  CHECK(call("waitformultipleobjectsex", {2, arr, 0, 0, 0}) == 1);
+  CHECK(!mock.is_signaled(nh2));
+
+  mock.set(nh1);
+  CHECK(ucall("msgwaitformultipleobjects", {2, arr, 0, 0, 0xff}) == 0);
+  CHECK(!mock.is_signaled(nh1));
+
+  mock.set(nh2);
+  CHECK(ucall("msgwaitformultipleobjectsex", {2, arr, 0, 0xff, 0}) == 1);
+  CHECK(!mock.is_signaled(nh2));
+
+  // 3. Non-consumption of unchosen auto-reset native events when an earlier handle wins (bWaitAll=FALSE).
+  // 3a. Guest auto-reset event at index 0 wins over signaled native auto-reset event at index 1.
+  mock.set(nh1);
+  put_handles({g_auto_sig, n_auto1});
+  CHECK(call("waitformultipleobjects", {2, arr, 0, 0}) == 0);
+  CHECK(mock.is_signaled(nh1));  // index 1 MUST remain signaled
+  CHECK(call("waitforsingleobject", {g_auto_sig, 0}) == 258);
+  CHECK(call("waitforsingleobject", {n_auto1, 0}) == 0);
+  CHECK(!mock.is_signaled(nh1));
+
+  // 3b. Native auto-reset event at index 1 wins over signaled native auto-reset event at index 2.
+  mock.set(nh1);
+  mock.set(nh2);
+  put_handles({g_auto_unsig, n_auto1, n_auto2});
+  CHECK(call("waitformultipleobjects", {3, arr, 0, 0}) == 1);
+  CHECK(!mock.is_signaled(nh1));
+  CHECK(mock.is_signaled(nh2));  // index 2 MUST NOT be consumed
+  CHECK(call("waitformultipleobjects", {3, arr, 0, 0}) == 2);
+  CHECK(!mock.is_signaled(nh2));
+
+  // 3c. Guest semaphore at index 1 wins over signaled native auto-reset event at index 2.
+  uint32_t msem = call("createsemaphorea", {0, 1, 2, 0});
+  CHECK(msem != 0);
+  mock.set(nh2);
+  put_handles({n_auto1, msem, n_auto2});
+  CHECK(call("waitformultipleobjects", {3, arr, 0, 0}) == 1);
+  CHECK(call("waitforsingleobject", {msem, 0}) == 258);
+  CHECK(mock.is_signaled(nh2));  // index 2 MUST NOT be consumed
+  CHECK(call("waitforsingleobject", {n_auto2, 0}) == 0);
+
+  // 4. Atomic-acquire semantics on bWaitAll=TRUE: ZERO consumption on failure/timeout.
+  // 4a. Native signaled + native unsignaled -> timeout consumes neither.
+  mock.set(nh1);
+  put_handles({n_auto1, n_auto2});
+  CHECK(call("waitformultipleobjects", {2, arr, 1, 0}) == 258);
+  CHECK(mock.is_signaled(nh1));
+  CHECK(call("waitformultipleobjects", {2, arr, 1, 15}) == 258);
+  CHECK(mock.is_signaled(nh1));
+
+  // 4b. Mixed guest signaled auto-reset + native signaled auto-reset + native unsignaled -> timeout consumes NONE.
+  CHECK(call("setevent", {g_auto_sig}) == 1);
+  put_handles({g_auto_sig, n_auto1, n_auto2});
+  CHECK(call("waitformultipleobjects", {3, arr, 1, 15}) == 258);
+  CHECK(mock.is_signaled(nh1));
+  CHECK(call("waitforsingleobject", {g_auto_sig, 0}) == 0);  // still signaled!
+
+  // 4c. Mixed native signaled + guest ready semaphore + guest free mutex + guest unsignaled event -> timeout consumes NONE.
+  CHECK(call("releasesemaphore", {msem, 1, 0}) == 1);
+  uint32_t mmutex = call("createmutexa", {0, 0, 0});
+  CHECK(mmutex != 0);
+  put_handles({n_auto1, msem, mmutex, g_auto_unsig});
+  CHECK(call("waitformultipleobjects", {4, arr, 1, 10}) == 258);
+  CHECK(mock.is_signaled(nh1));
+  // Verify mutex was NOT acquired (still unowned: ReleaseMutex fails with ERROR_NOT_OWNER=288).
+  CHECK(call("releasemutex", {mmutex}) == 0 && call("getlasterror", {}) == 288);
+  // Verify semaphore still has count==1.
+  CHECK(call("waitforsingleobject", {msem, 0}) == 0);
+  CHECK(call("waitforsingleobject", {msem, 0}) == 258);
+
+  // 4d. Mixed native signaled + guest semaphore(count==0) -> timeout must NOT touch native event, and INFINITE still faults.
+  put_handles({n_auto1, msem});
+  CHECK(call("waitformultipleobjects", {2, arr, 1, 10}) == 258);
+  CHECK(mock.is_signaled(nh1));
+  bool unready_guest_fault = false;
+  try { call("waitformultipleobjects", {2, arr, 1, 0xffffffffu}); }
+  catch (const Fault&) { unready_guest_fault = true; }
+  CHECK(unready_guest_fault);
+  CHECK(mock.is_signaled(nh1));  // STILL not consumed
+
+  // 4e. Successful atomic acquire of mixed [semaphore, abandoned mutex, native auto-reset] returns WAIT_ABANDONED_0.
+  CHECK(call("releasesemaphore", {msem, 1, 0}) == 1);
+  mem.w32(0x1024, 9); cpu.fs_base = 0x1000;
+  CHECK(call("waitforsingleobject", {mmutex, 0}) == 0);
+  g.abandon_mutexes(9);
+  mem.w32(0x1024, 1);
+  put_handles({msem, mmutex, n_auto1});
+  CHECK(call("waitformultipleobjects", {3, arr, 1, 0}) == 0x80u);
+  CHECK(!mock.is_signaled(nh1));
+  CHECK(call("waitforsingleobject", {msem, 0}) == 258);
+  CHECK(call("releasemutex", {mmutex}) == 1);
+
+  // 4f. Successful wait_all on two native notify events (one auto-reset, one manual-reset).
+  mock.set(nh1);
+  mock.set(nhm);
+  put_handles({n_auto1, n_manual});
+  CHECK(call("waitformultipleobjects", {2, arr, 1, 0}) == 0);
+  CHECK(!mock.is_signaled(nh1));
+  CHECK(mock.is_signaled(nhm));  // manual-reset stays signaled
+  CHECK(call("resetevent", {n_manual}) == 1);
+  CHECK(!mock.is_signaled(nhm));
+
+  // 5. Real blocking wait woken by another thread signaling a native notify event.
+  // 5a. bWaitAll=FALSE with finite timeout wakes promptly on index 1.
+  {
+   put_handles({n_auto1, n_auto2});
+   std::thread signaler([&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    mock.set(nh2);
+   });
+   auto t0 = std::chrono::steady_clock::now();
+   uint32_t res = call("waitformultipleobjects", {2, arr, 0, 2000});
+   auto elapsed = std::chrono::steady_clock::now() - t0;
+   signaler.join();
+   CHECK(res == 1);
+   CHECK(elapsed < std::chrono::milliseconds(1500));
+   CHECK(!mock.is_signaled(nh2));
+  }
+
+  // 5b. bWaitAll=FALSE with INFINITE timeout wakes on native notify event (does NOT throw Fault).
+  {
+   put_handles({g_auto_unsig, n_auto1});
+   std::thread signaler([&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    mock.set(nh1);
+   });
+   uint32_t res = call("waitformultipleobjects", {2, arr, 0, 0xffffffffu});
+   signaler.join();
+   CHECK(res == 1);
+   CHECK(!mock.is_signaled(nh1));
+  }
+
+  // 5c. bWaitAll=TRUE with INFINITE timeout on mixed [semaphore(count=1), n_auto1, n_auto2]:
+  //     signaler sets n_auto1 at +20ms, then n_auto2 at +40ms -> wakes atomically when both are ready.
+  {
+   CHECK(call("releasesemaphore", {msem, 1, 0}) == 1);
+   put_handles({msem, n_auto1, n_auto2});
+   std::thread signaler([&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    mock.set(nh1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    mock.set(nh2);
+   });
+   uint32_t res = call("waitformultipleobjects", {3, arr, 1, 0xffffffffu});
+   signaler.join();
+   CHECK(res == 0);
+   CHECK(!mock.is_signaled(nh1));
+   CHECK(!mock.is_signaled(nh2));
+   CHECK(call("waitforsingleobject", {msem, 0}) == 258);
+  }
+
+  // 5d. bWaitAll=TRUE with finite timeout where only one native event signals before expiry:
+  //     must return WAIT_TIMEOUT and MUST NOT consume the event that signaled!
+  {
+   put_handles({n_auto1, n_auto2});
+   std::thread signaler([&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    mock.set(nh1);
+   });
+   uint32_t res = call("waitformultipleobjects", {2, arr, 1, 50});
+   signaler.join();
+   CHECK(res == 258);
+   CHECK(mock.is_signaled(nh1));  // n_auto1 was NOT consumed!
+   CHECK(call("waitforsingleobject", {n_auto1, 0}) == 0);
+   CHECK(!mock.is_signaled(nh1));
+  }
+
+  // 5e. Timeout on unsignaled native events waits for duration and returns WAIT_TIMEOUT.
+  {
+   put_handles({n_auto1, n_auto2});
+   auto t0 = std::chrono::steady_clock::now();
+   uint32_t res = call("waitformultipleobjects", {2, arr, 0, 35});
+   auto elapsed = std::chrono::steady_clock::now() - t0;
+   CHECK(res == 258);
+   CHECK(elapsed >= std::chrono::milliseconds(25) && elapsed < std::chrono::milliseconds(1500));
+   CHECK(!mock.is_signaled(nh1) && !mock.is_signaled(nh2));
+  }
+
+  // 5f. Cooperative guest worker signaling an event wakes WaitForMultipleObjects with INFINITE.
+  {
+   uint32_t coop = call("createeventa", {0, 0, 0, 0});
+   CHECK(coop != 0);
+   body(0x31090, coop, th.add(reg.map.at({"kernel32.dll", "setevent"})));
+   CHECK(call("createthread", {0, 0, 0x31090, 0, 0, 0}) != 0);
+   put_handles({n_auto1, coop});
+   CHECK(call("waitformultipleobjects", {2, arr, 0, 0xffffffffu}) == 1);
+   CHECK(call("closehandle", {coop}) == 1);
+  }
+
+  CHECK(call("closehandle", {n_auto1}) == 1);
+  CHECK(call("closehandle", {n_auto2}) == 1);
+  CHECK(call("closehandle", {n_manual}) == 1);
+  CHECK(call("closehandle", {g_auto_sig}) == 1);
+  CHECK(call("closehandle", {g_auto_unsig}) == 1);
+  CHECK(call("closehandle", {msem}) == 1);
+  CHECK(call("closehandle", {mmutex}) == 1);
+  host.native_events = {};
+ }
+
  std::printf("x86-sync: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }
 #endif

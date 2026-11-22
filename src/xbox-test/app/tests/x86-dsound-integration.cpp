@@ -78,6 +78,33 @@ int main() {
         FAILED(buffer->GetPan(&pan)) || pan != -500 ||
         FAILED(buffer->GetFrequency(&frequency)) || frequency != 44100) return 29;
     if (WaitForSingleObject(event, 2000) != WAIT_OBJECT_0) return 31;
+
+    HANDLE other = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    HANDLE tail = CreateEventA(nullptr, FALSE, TRUE, nullptr);
+    HANDLE tail2 = CreateEventA(nullptr, FALSE, TRUE, nullptr);
+    if (!other || !tail || !tail2) return 33;
+    // Wait-any with two signaled auto-reset events must consume only index 0.
+    HANDLE auto_pair[2] = {tail, tail2};
+    if (WaitForMultipleObjects(2, auto_pair, FALSE, 0) != WAIT_OBJECT_0) return 34;
+    if (WaitForSingleObject(tail, 0) != WAIT_TIMEOUT) return 35;
+    if (WaitForSingleObject(tail2, 0) != WAIT_OBJECT_0) return 36;
+    // Wait-all failing with an unsignaled handle must not consume the signaled auto-reset event.
+    if (!SetEvent(tail)) return 37;
+    HANDLE fail_all[2] = {other, tail};
+    if (WaitForMultipleObjects(2, fail_all, TRUE, 0) != WAIT_TIMEOUT) return 38;
+    if (WaitForSingleObject(tail, 0) != WAIT_OBJECT_0) return 39;
+    // Blocking WaitForMultipleObjects (finite and INFINITE) woken by the DirectSound notify event.
+    if (!ResetEvent(event)) return 40;
+    HANDLE notify_any[2] = {other, event};
+    if (WaitForMultipleObjects(2, notify_any, FALSE, 2000) != WAIT_OBJECT_0 + 1) return 41;
+    if (!ResetEvent(event)) return 42;
+    if (WaitForMultipleObjects(2, notify_any, FALSE, INFINITE) != WAIT_OBJECT_0 + 1) return 43;
+    // Blocking atomic WaitForMultipleObjects (bWaitAll=TRUE) woken by the DirectSound notify event.
+    if (!ResetEvent(event) || !SetEvent(tail)) return 44;
+    HANDLE notify_all[2] = {tail, event};
+    if (WaitForMultipleObjects(2, notify_all, TRUE, 2000) != WAIT_OBJECT_0) return 45;
+    if (WaitForSingleObject(tail, 0) != WAIT_TIMEOUT) return 46;
+
     if (FAILED(buffer->Stop())) return 32;
 
     notify->Release();
@@ -85,8 +112,11 @@ int main() {
     buffer->Release();
     primary->Release();
     device->Release();
+    CloseHandle(tail2);
+    CloseHandle(tail);
+    CloseHandle(other);
     CloseHandle(event);
-    puts("X86-DSOUND PASS: create, wrap lock, looping cursor, controls, notify QI/event, releases");
+    puts("X86-DSOUND PASS: create, wrap lock, looping cursor, controls, notify QI/event, WFMO, releases");
     return 0;
 }
 #else

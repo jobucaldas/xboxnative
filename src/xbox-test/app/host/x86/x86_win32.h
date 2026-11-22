@@ -222,6 +222,17 @@ struct Host {
     std::function<uintptr_t(uint32_t)> dsound_event;
     static constexpr uint32_t DSOUND_WAIT_UNHANDLED = 0xfffffffeu;
     std::function<uint32_t(Cpu&, uint32_t, uint32_t)> dsound_wait;
+    std::function<uintptr_t(uint32_t)> dsound_aux_event;
+    std::function<void(Cpu&, uint32_t)> dsound_aux_process;
+    struct NativeEventBackend {
+        std::function<uintptr_t(bool manual, bool initial)> create;
+        std::function<void(uintptr_t)> close;
+        std::function<void(uintptr_t)> set;
+        std::function<void(uintptr_t)> reset;
+        std::function<void(uintptr_t)> pulse;
+        std::function<uint32_t(const uintptr_t* handles, uint32_t count, bool wait_all, uint32_t timeout)> wait_multiple;
+    };
+    NativeEventBackend native_events;
     std::function<uintptr_t(uint32_t)> d3d9_window;
     std::function<uint32_t(D3D11CreateArgs&)> d3d11_create;   // empty: the bridge reports a D3D11 gap
     ComSpace com;

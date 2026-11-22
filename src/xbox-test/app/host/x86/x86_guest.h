@@ -118,8 +118,10 @@ struct Guest {
     }
     static uint32_t remaining_timeout(Clock::time_point deadline, uint32_t timeout) {
         if (timeout == 0xffffffffu) return timeout;
-        auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
-        return left > 0 ? uint32_t(left > 0xffffffffll ? 0xffffffffu : left) : 0u;
+        auto now = Clock::now();
+        if (deadline <= now) return 0u;
+        auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - now).count();
+        return left > 0xfffffffeLL ? 0xfffffffeu : uint32_t(left);
     }
     std::string exe_path, cmdline;
     SteamClientRegistry steam_registry=steam_client_registry_config();
@@ -285,21 +287,105 @@ struct Guest {
         for (unsigned char ch : narrow) name.push_back(char16_t(ch));
         return name;
     }
+    bool native_event_create_enabled() const {
+        if (host.native_events.create) return true;
+#if defined(_WIN32)
+        return true;
+#else
+        return false;
+#endif
+    }
+    bool native_event_backend_active() const {
+        if (host.native_events.wait_multiple) return true;
+#if defined(_WIN32)
+        return true;
+#else
+        return false;
+#endif
+    }
+    uintptr_t native_event_create(bool manual, bool initial, uint32_t& error) const {
+        if (host.native_events.create) {
+            uintptr_t h = host.native_events.create(manual, initial);
+            if (!h) error = 8;
+            return h;
+        }
+#if defined(_WIN32)
+        HANDLE event = CreateEventExW(nullptr, nullptr,
+            (manual ? CREATE_EVENT_MANUAL_RESET : 0) | (initial ? CREATE_EVENT_INITIAL_SET : 0),
+            EVENT_ALL_ACCESS);
+        if (!event) { error = GetLastError(); return 0; }
+        return reinterpret_cast<uintptr_t>(event);
+#else
+        (void)manual; (void)initial; (void)error;
+        return 0;
+#endif
+    }
+    void native_event_close(uintptr_t handle) const {
+        if (!handle) return;
+        if (host.native_events.close) { host.native_events.close(handle); return; }
+#if defined(_WIN32)
+        CloseHandle(reinterpret_cast<HANDLE>(handle));
+#endif
+    }
+    void native_event_set(uintptr_t handle) const {
+        if (!handle) return;
+        if (host.native_events.set) { host.native_events.set(handle); return; }
+#if defined(_WIN32)
+        SetEvent(reinterpret_cast<HANDLE>(handle));
+#endif
+    }
+    void native_event_reset(uintptr_t handle) const {
+        if (!handle) return;
+        if (host.native_events.reset) { host.native_events.reset(handle); return; }
+#if defined(_WIN32)
+        ResetEvent(reinterpret_cast<HANDLE>(handle));
+#endif
+    }
+    void native_event_pulse(uintptr_t handle) const {
+        if (!handle) return;
+        if (host.native_events.pulse) { host.native_events.pulse(handle); return; }
+#if defined(_WIN32)
+        using PulseEventFn = BOOL (WINAPI*)(HANDLE);
+        static HMODULE base = LoadLibraryExW(L"kernelbase.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        static HMODULE k32 = LoadLibraryExW(L"kernel32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        auto pulse = base ? reinterpret_cast<PulseEventFn>(GetProcAddress(base, "PulseEvent")) : nullptr;
+        if (!pulse && k32) pulse = reinterpret_cast<PulseEventFn>(GetProcAddress(k32, "PulseEvent"));
+        if (pulse) pulse(reinterpret_cast<HANDLE>(handle));
+#endif
+    }
+    uint32_t native_event_wait_multiple(const uintptr_t* handles, uint32_t count, bool wait_all, uint32_t timeout) const {
+        if (!count || count > 64 || !handles) return 0xffffffffu;
+        if (host.native_events.wait_multiple) return host.native_events.wait_multiple(handles, count, wait_all, timeout);
+#if defined(_WIN32)
+        HANDLE native[64]{};
+        for (uint32_t i = 0; i < count; ++i) native[i] = reinterpret_cast<HANDLE>(handles[i]);
+        DWORD waited = count == 1
+            ? WaitForSingleObjectEx(native[0], timeout, FALSE)
+            : WaitForMultipleObjectsEx(count, native, wait_all ? TRUE : FALSE, timeout, FALSE);
+        if (waited == WAIT_TIMEOUT) return 258u;
+        if (waited == WAIT_FAILED) return 0xffffffffu;
+        if (waited >= WAIT_OBJECT_0 && waited < WAIT_OBJECT_0 + count) return uint32_t(waited - WAIT_OBJECT_0);
+        return 0xffffffffu;
+#else
+        (void)wait_all; (void)timeout;
+        return 0xffffffffu;
+#endif
+    }
     uint32_t create_sync(SyncKind kind, uint32_t namep, bool wide, bool manual, bool initial, int32_t count, int32_t maximum, uint32_t owner) {
         std::u16string name = sync_name(namep, wide); uint32_t id = 0;
         if (!name.empty()) { auto it = sync_names.find(name); if (it != sync_names.end()) { id = it->second; if (sync_objects[id].kind != kind) { set_last_error(6); return 0; } set_last_error(183); } }
         if (!id) { id = ++sync_serial; SyncObject o{}; o.kind=kind; o.name=name; o.manual=manual; o.signaled=initial; o.owner=owner; o.recursion=owner?1u:0u; o.count=uint32_t(count); o.maximum=uint32_t(maximum);
-#if defined(_WIN32)
-            if(kind==SyncKind::Event){HANDLE event=CreateEventExW(nullptr,nullptr,(manual?CREATE_EVENT_MANUAL_RESET:0)|(initial?CREATE_EVENT_INITIAL_SET:0),EVENT_ALL_ACCESS);if(!event){set_last_error(GetLastError());return 0;}o.native_event=reinterpret_cast<uintptr_t>(event);}
-#endif
+            if (kind == SyncKind::Event && native_event_create_enabled()) {
+                uint32_t err = 0;
+                o.native_event = native_event_create(manual, initial, err);
+                if (!o.native_event) { set_last_error(err ? err : 8); return 0; }
+            }
             sync_objects[id]=o; if (!name.empty()) sync_names[name]=id; set_last_error(0); }
         return add_sync_handle(id);
     }
     uint32_t open_sync(SyncKind kind, uint32_t namep, bool wide) { std::u16string name=sync_name(namep,wide);auto it=sync_names.find(name);if(it==sync_names.end()){set_last_error(2);return 0;}if(sync_objects[it->second].kind!=kind){set_last_error(6);return 0;}return add_sync_handle(it->second); }
     bool close_sync(uint32_t h) { auto it=sync_handles.find(h); if(it==sync_handles.end())return false; uint32_t id=it->second; sync_handles.erase(it); auto& o=sync_objects[id]; if(!--o.refs){if(!o.name.empty())sync_names.erase(o.name);
-#if defined(_WIN32)
-        if(o.native_event)CloseHandle(reinterpret_cast<HANDLE>(o.native_event));
-#endif
+        if(o.native_event)native_event_close(o.native_event);
         sync_objects.erase(id);} return true; }
     uint32_t add_file_handle(uint64_t native) { uint32_t h=0x50000000u+(++file_serial); file_handles[h]=native; return h; }
     bool call_file(Host::FileCall& call) { if(!host.file_call){call.error=120;return false;} host.file_call(call); return call.succeeded; }
@@ -332,18 +418,27 @@ struct Guest {
         Host::FileCall close{Host::FileCall::Kind::Close};close.handle=handle;if(!call_file(close)&&ok){ok=false;error=close.error?close.error:5;}
         return ok;
     }
-    // WaitForSingleObject runs pending guest bodies first. Windows event objects
-    // also have a native handle so asynchronous XAudio callbacks can signal a wait;
-    // mutexes and semaphores remain synchronous guest-state checks.
+    // WaitForSingleObject runs pending guest bodies first. Native-backed event
+    // objects delegate to the OS (or host native event backend) so asynchronous
+    // XAudio/DirectSound callbacks can wake a wait; mutexes and semaphores
+    // remain synchronous guest-state checks.
     uint32_t sync_wait(Cpu& c, uint32_t h, uint32_t timeout) {
         auto it=sync_handles.find(h); if(it==sync_handles.end())return 0xffffffffu; auto& o=sync_objects[it->second];
-        uint32_t tid=c.fs_base?c.mem.r32(c.fs_base+0x24):1u;
-#if defined(_WIN32)
-        if(o.kind==SyncKind::Event&&o.native_event){
-            if(host.dsound_wait){uint32_t waited=host.dsound_wait(c,h,timeout);if(waited!=Host::DSOUND_WAIT_UNHANDLED){if(waited==WAIT_OBJECT_0){o.signaled=o.manual;return 0;}if(waited==WAIT_TIMEOUT)return 258u;return 0xffffffffu;}}
-            DWORD waited=WaitForSingleObject(reinterpret_cast<HANDLE>(o.native_event),timeout);if(waited==WAIT_OBJECT_0){o.signaled=o.manual;return 0;}if(waited==WAIT_TIMEOUT)return 258u;return 0xffffffffu;
+        uint32_t tid=c.fs_base?c.mem.r32(c.fs_base+0x24):0u; if(!tid)tid=1u;
+        if(o.kind==SyncKind::Event&&o.native_event&&native_event_backend_active()){
+            if(!host.native_events.wait_multiple&&host.dsound_wait){
+                uint32_t waited=host.dsound_wait(c,h,timeout);
+                if(waited!=Host::DSOUND_WAIT_UNHANDLED){
+                    if(waited==0u){o.signaled=o.manual;return 0;}
+                    if(waited==258u)return 258u;
+                    return 0xffffffffu;
+                }
+            }
+            uint32_t waited=native_event_wait_multiple(&o.native_event,1,false,timeout);
+            if(waited==0u){o.signaled=o.manual;return 0;}
+            if(waited==258u)return 258u;
+            return 0xffffffffu;
         }
-#endif
         if(o.kind==SyncKind::Event&&o.signaled){if(!o.manual)o.signaled=false;return 0;}
         if(o.kind==SyncKind::Semaphore&&o.count){--o.count;return 0;}
         if(o.kind==SyncKind::Mutex&&(!o.owner||o.owner==tid)){uint32_t r=o.abandoned?0x80u:0u;o.abandoned=false;o.owner=tid;++o.recursion;return r;}
@@ -352,26 +447,189 @@ struct Guest {
         return 258u;
     }
     uint32_t sync_wait_multiple(Cpu& c, uint32_t count, uint32_t handles, bool wait_all, uint32_t timeout, bool allow_empty=false) {
-        if((!count&&!allow_empty)||count>64||(count&&!handles)){set_last_error(87);return 0xffffffffu;}
+        const uint32_t max_count=allow_empty?63u:64u;
+        if((!count&&!allow_empty)||count>max_count||(count&&!handles)){set_last_error(87);return 0xffffffffu;}
         Clock::time_point deadline{};
         if(timeout!=0xffffffffu) deadline=Clock::now()+std::chrono::milliseconds(timeout);
         run_pending_threads(c);
-        std::vector<uint32_t> values(count); uint32_t ready_count=0, ready_index=0;
-        for(uint32_t i=0;i<count;++i){uint32_t h=mem.r32(handles+i*4);values[i]=h;
-            if(thread_ids.count(h)||thread_exit_codes.count(h)){if(!ready_count)ready_index=i;++ready_count;continue;}
-            auto it=sync_handles.find(h);if(it==sync_handles.end()){set_last_error(6);return 0xffffffffu;}
-            const auto& o=sync_objects[it->second];uint32_t tid=c.fs_base?mem.r32(c.fs_base+0x24):1u;
-            bool ready=(o.kind==SyncKind::Event&&o.signaled)||(o.kind==SyncKind::Semaphore&&o.count)||(o.kind==SyncKind::Mutex&&(!o.owner||o.owner==tid));
-            if(ready){if(!ready_count)ready_index=i;++ready_count;}
+        if(!count){
+            if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForMultipleObjects: unsignaled infinite wait");
+            sleep_until(deadline);
+            return 258u;
         }
-        if(wait_all?(count&&ready_count==count):ready_count!=0){
-            if(wait_all){uint32_t abandoned=0;for(uint32_t h:values)if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;if(r==0x80u)abandoned=0x80u;}return abandoned;}
-            uint32_t h=values[ready_index];if(sync_handles.count(h)){uint32_t r=sync_wait(c,h,0);if(r==0xffffffffu)return r;if(r==0x80u)return 0x80u+ready_index;}
-            return ready_index;
+        struct WaitEntry {
+            uint32_t handle = 0;
+            uint32_t object_id = 0;
+            uintptr_t native_event = 0;
+            uintptr_t aux_event = 0;
+            bool is_thread = false;
+        };
+        const bool native_active=native_event_backend_active();
+        WaitEntry entries[64]{};
+        for(uint32_t i=0;i<count;++i){
+            uint32_t h=mem.r32(handles+i*4);
+            entries[i].handle=h;
+            if(thread_ids.count(h)||thread_exit_codes.count(h)){entries[i].is_thread=true;continue;}
+            auto it=sync_handles.find(h);
+            if(it==sync_handles.end()||!sync_objects.count(it->second)){set_last_error(6);return 0xffffffffu;}
+            entries[i].object_id=it->second;
+            const auto& o=sync_objects[it->second];
+            if(o.kind==SyncKind::Event&&o.native_event&&native_active){
+                entries[i].native_event=o.native_event;
+                if(!host.native_events.wait_multiple&&host.dsound_aux_event)
+                    entries[i].aux_event=host.dsound_aux_event(h);
+            }
         }
-        if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForMultipleObjects: unsignaled infinite wait");
-        sleep_until(deadline);
-        return 258u;
+        if(wait_all){
+            for(uint32_t i=0;i<count;++i){
+                for(uint32_t j=i+1;j<count;++j){
+                    if(entries[i].is_thread&&entries[j].is_thread&&entries[i].handle==entries[j].handle){set_last_error(87);return 0xffffffffu;}
+                    if(!entries[i].is_thread&&!entries[j].is_thread&&entries[i].object_id==entries[j].object_id){set_last_error(87);return 0xffffffffu;}
+                }
+            }
+        }
+        uint32_t tid=c.fs_base?mem.r32(c.fs_base+0x24):0u; if(!tid)tid=1u;
+        auto guest_ready = [&](const WaitEntry& e) -> bool {
+            if(e.is_thread)return true;
+            const auto& o=sync_objects[e.object_id];
+            if(o.kind==SyncKind::Event)return o.signaled;
+            if(o.kind==SyncKind::Semaphore)return o.count!=0;
+            if(o.kind==SyncKind::Mutex)return !o.owner||o.owner==tid;
+            return false;
+        };
+        auto guest_acquire = [&](const WaitEntry& e) -> uint32_t {
+            if(e.is_thread)return 0u;
+            auto& o=sync_objects[e.object_id];
+            if(o.kind==SyncKind::Event){if(!o.manual)o.signaled=false;return 0u;}
+            if(o.kind==SyncKind::Semaphore){--o.count;return 0u;}
+            if(o.kind==SyncKind::Mutex){uint32_t r=o.abandoned?0x80u:0u;o.abandoned=false;o.owner=tid;++o.recursion;return r;}
+            return 0xffffffffu;
+        };
+        // Transfer any already-completed waveOut auxiliary event into the guest's
+        // native event so readiness checks and wait-all see it without losing it.
+        for(uint32_t i=0;i<count;++i){
+            if(entries[i].aux_event&&host.dsound_aux_process){
+                if(native_event_wait_multiple(&entries[i].aux_event,1,false,0)==0u)
+                    host.dsound_aux_process(c,entries[i].handle);
+            }
+        }
+
+        if(!wait_all){
+            // In-order scan stops at the lowest-index ready object so no later
+            // auto-reset event (guest or native) is ever polled or consumed.
+            for(uint32_t i=0;i<count;++i){
+                if(entries[i].native_event){
+                    uint32_t waited=native_event_wait_multiple(&entries[i].native_event,1,false,0);
+                    if(waited==0u){
+                        auto& o=sync_objects[entries[i].object_id];
+                        o.signaled=o.manual;
+                        return i;
+                    }
+                    if(waited!=258u){set_last_error(6);return 0xffffffffu;}
+                } else if(guest_ready(entries[i])){
+                    uint32_t r=guest_acquire(entries[i]);
+                    if(r==0xffffffffu){set_last_error(6);return 0xffffffffu;}
+                    return r+i;
+                }
+            }
+            // Not ready yet: collect unique native handles (preserving lowest guest index)
+            // and perform a real blocking native wait.
+            uintptr_t native_handles[64]{};
+            uint32_t native_to_guest[64]{};
+            bool native_is_aux[64]{};
+            uint32_t native_count=0;
+            auto push_native = [&](uintptr_t nh, uint32_t guest_idx, bool is_aux) {
+                if(!nh||native_count>=64)return;
+                for(uint32_t k=0;k<native_count;++k)if(native_handles[k]==nh)return;
+                native_handles[native_count]=nh;
+                native_to_guest[native_count]=guest_idx;
+                native_is_aux[native_count]=is_aux;
+                ++native_count;
+            };
+            for(uint32_t i=0;i<count;++i)if(entries[i].native_event)push_native(entries[i].native_event,i,false);
+            for(uint32_t i=0;i<count;++i)if(entries[i].aux_event)push_native(entries[i].aux_event,i,true);
+            if(!native_count){
+                if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForMultipleObjects: unsignaled infinite wait");
+                sleep_until(deadline);
+                return 258u;
+            }
+            uint32_t rem=remaining_timeout(deadline,timeout);
+            if(!rem)return 258u;
+            uint32_t waited=native_event_wait_multiple(native_handles,native_count,false,rem);
+            if(waited<native_count){
+                uint32_t guest_idx=native_to_guest[waited];
+                if(native_is_aux[waited]&&host.dsound_aux_process){
+                    host.dsound_aux_process(c,entries[guest_idx].handle);
+                    native_event_wait_multiple(&entries[guest_idx].native_event,1,false,0);
+                }
+                auto& o=sync_objects[entries[guest_idx].object_id];
+                o.signaled=o.manual;
+                return guest_idx;
+            }
+            if(waited==258u)return 258u;
+            set_last_error(6);
+            return 0xffffffffu;
+        }
+
+        // wait_all == true: atomic-acquire semantics.
+        // Check every guest-only object first without consuming anything; if any
+        // guest-only object is unready, no native event is touched or consumed.
+        for(uint32_t i=0;i<count;++i){
+            if(!entries[i].native_event&&!guest_ready(entries[i])){
+                if(timeout==0xffffffffu)throw Fault(FaultKind::Unsupported,c.eip,c.eip,"WaitForMultipleObjects: unsignaled infinite wait");
+                sleep_until(deadline);
+                return 258u;
+            }
+        }
+        uintptr_t native_handles[64]{};
+        uint32_t native_entries[64]{};
+        uintptr_t aux_handles[64]{};
+        uint32_t aux_entries[64]{};
+        uint32_t native_count=0, aux_count=0;
+        for(uint32_t i=0;i<count;++i){
+            if(entries[i].native_event){
+                native_handles[native_count]=entries[i].native_event;
+                native_entries[native_count]=i;
+                ++native_count;
+                if(entries[i].aux_event){
+                    aux_handles[aux_count]=entries[i].aux_event;
+                    aux_entries[aux_count]=i;
+                    ++aux_count;
+                }
+            }
+        }
+        if(native_count){
+            uint32_t waited=258u;
+            if(!aux_count){
+                waited=native_event_wait_multiple(native_handles,native_count,true,remaining_timeout(deadline,timeout));
+            } else {
+                for(;;){
+                    waited=native_event_wait_multiple(native_handles,native_count,true,0);
+                    if(waited!=258u)break;
+                    uint32_t rem=remaining_timeout(deadline,timeout);
+                    if(!rem)break;
+                    uint32_t slice=(rem==0xffffffffu||rem>10u)?10u:rem;
+                    uint32_t aux_w=native_event_wait_multiple(aux_handles,aux_count,false,slice);
+                    if(aux_w<aux_count&&host.dsound_aux_process)
+                        host.dsound_aux_process(c,entries[aux_entries[aux_w]].handle);
+                    else if(aux_w!=258u){waited=0xffffffffu;break;}
+                }
+            }
+            if(waited==258u)return 258u;
+            if(waited>=native_count){set_last_error(6);return 0xffffffffu;}
+            for(uint32_t k=0;k<native_count;++k){
+                auto& o=sync_objects[entries[native_entries[k]].object_id];
+                o.signaled=o.manual;
+            }
+        }
+        // All native events are atomically acquired; now acquire all guest-only objects.
+        uint32_t abandoned=0u;
+        for(uint32_t i=0;i<count;++i){
+            if(entries[i].native_event)continue;
+            uint32_t r=guest_acquire(entries[i]);
+            if(r==0x80u)abandoned=0x80u;
+        }
+        return abandoned;
     }
     void abandon_mutexes(uint32_t tid) { for(auto& kv:sync_objects)if(kv.second.kind==SyncKind::Mutex&&kv.second.owner==tid){kv.second.owner=kv.second.recursion=0;kv.second.abandoned=true;} }
     // A FILE* is one of our three iob entries; anything else is a bad handle.
@@ -1687,24 +1945,13 @@ inline void Guest::register_all() {
     // CreateSemaphoreExW(attributes, initial, maximum, name, flags, access): the flags are reserved and must be zero.
     reg.add("kernel32.dll","CreateSemaphoreExW",Conv::Stdcall,6,[this](Cpu& c)->uint32_t{int32_t initial=int32_t(c.arg(1)),maximum=int32_t(c.arg(2));if(c.arg(4)||initial<0||maximum<=0||initial>maximum){set_last_error(87);return 0;}return create_sync(SyncKind::Semaphore,c.arg(3),true,false,false,initial,maximum,0);});
     reg.add("kernel32.dll","SetEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}auto& o=sync_objects[h->second];o.signaled=true;
-#if defined(_WIN32)
-        if(o.native_event)SetEvent(reinterpret_cast<HANDLE>(o.native_event));
-#endif
+        if(o.native_event)native_event_set(o.native_event);
         return 1;});
     reg.add("kernel32.dll","ResetEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}auto& o=sync_objects[h->second];o.signaled=false;
-#if defined(_WIN32)
-        if(o.native_event)ResetEvent(reinterpret_cast<HANDLE>(o.native_event));
-#endif
+        if(o.native_event)native_event_reset(o.native_event);
         return 1;});
     reg.add("kernel32.dll","PulseEvent",Conv::Stdcall,1,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Event){set_last_error(6);return 0;}auto& o=sync_objects[h->second];o.signaled=false;
-#if defined(_WIN32)
-        using PulseEventFn=BOOL(WINAPI*)(HANDLE);
-        static HMODULE base=LoadLibraryExW(L"kernelbase.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
-        static HMODULE k32=LoadLibraryExW(L"kernel32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
-        auto pulse=base?reinterpret_cast<PulseEventFn>(GetProcAddress(base,"PulseEvent")):nullptr;
-        if(!pulse&&k32)pulse=reinterpret_cast<PulseEventFn>(GetProcAddress(k32,"PulseEvent"));
-        if(o.native_event&&pulse)pulse(reinterpret_cast<HANDLE>(o.native_event));
-#endif
+        if(o.native_event)native_event_pulse(o.native_event);
         return 1;});
     reg.add("kernel32.dll","ReleaseMutex",Conv::Stdcall,1,[this,sync_current_thread](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Mutex){set_last_error(6);return 0;}auto& o=sync_objects[h->second];if(o.owner!=sync_current_thread(c)||!o.recursion){set_last_error(288);return 0;}if(!--o.recursion)o.owner=0;return 1;});
     reg.add("kernel32.dll","ReleaseSemaphore",Conv::Stdcall,3,[this](Cpu& c)->uint32_t{auto h=sync_handles.find(c.arg(0));int32_t n=int32_t(c.arg(1));if(h==sync_handles.end()||sync_objects[h->second].kind!=SyncKind::Semaphore){set_last_error(6);return 0;}auto& o=sync_objects[h->second];if(n<=0){set_last_error(87);return 0;}if(uint32_t(n)>o.maximum-o.count){set_last_error(298);return 0;}if(c.arg(2))mem.w32(c.arg(2),o.count);o.count+=uint32_t(n);return 1;});
