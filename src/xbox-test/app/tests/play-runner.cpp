@@ -24,6 +24,8 @@ static unsigned loaderLockChecks=0, loaderLockFailures=0;
 // Mode "lobbies": the round trips the fake CM served, so the mode can tell the
 // launcher's tap answered the guest and the provider's stand-in did not.
 static std::atomic<int> lobbyCreates{0}, lobbyLists{0}, lobbyJoins{0}, lobbyLeaves{0};
+// Phase 2: SetLobbyData / chat / game server / invite requests, and list filters, the CM saw.
+static std::atomic<int> lobbySetData{0}, lobbyChats{0}, lobbyServers{0}, lobbyInvites{0}, lobbyFilters{0};
 static void observeLoaderLock();
 static DWORD WINAPI hostFilename(HMODULE h,LPWSTR out,DWORD size) {
     if(probeLoaderLock)observeLoaderLock();
@@ -319,6 +321,24 @@ static void logline(const char* s){
         SetEvent(attachReached);attachWaitOK=WaitForSingleObject(attachRelease,10000)==WAIT_OBJECT_0;
     }
 }
+// Mode "lobbies": the fake CM's lobby. Ids are fixture values, never an account, and
+// nothing below is logged: the runner prints counts only.
+static const uint64_t lobbyOwnerId=0x110000100000001ull,lobbyPeerId=0x110000100000003ull,lobbyCreatedId=0x1100001000777ull;
+// CMsgClientMMSLobbyData: the GetLobbyData answer and the pushed update.
+static std::string lobbyDataBody(uint64_t lobby,const std::map<std::string,std::string>& kv) {
+    std::string owner,peer,out;
+    pb_fixed64(owner,1,lobbyOwnerId);pb_s(owner,2,"Fixture Owner");pb_s(owner,3,steam_lobbies::kv_encode({{"role","host"}}));
+    pb_fixed64(peer,1,lobbyPeerId);pb_s(peer,2,"Fixture Peer");
+    pb_u(out,1,3405340);pb_fixed64(out,2,lobby);pb_u(out,4,4);pb_u(out,5,2);
+    pb_fixed64(out,7,lobbyOwnerId);pb_s(out,8,steam_lobbies::kv_encode(kv));
+    pb_s(out,9,owner);pb_s(out,9,peer);
+    return out;
+}
+static std::string lobbyChatBody(uint64_t lobby,uint64_t sender,const std::string& text) {
+    std::string out;
+    pb_u(out,1,3405340);pb_fixed64(out,2,lobby);pb_fixed64(out,3,sender);pb_s(out,4,text);
+    return out;
+}
 int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
     wchar_t path[32768];GetModuleFileNameW(nullptr,path,32768);std::wstring root=path;root.resize(root.find_last_of(L"\\/"));
     g_dir=root;
@@ -564,22 +584,59 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         config.bridge=std::make_shared<steam_lobbies::Bridge>();
         config.appid=3405340;
         config.persona="Fixture Owner";
+        config.self_id=lobbyOwnerId;
         config.io.call=[](uint32_t emsg,uint32_t routing,const std::string& body,std::string& out){
             // Steam answers no MMS request that does not carry the app id.
             if(routing!=3405340)return false;
             if(emsg==steam_lobbies::CreateLobby) {
                 ++lobbyCreates;
-                pb_u(out,1,3405340);pb_fixed64(out,2,0x1100001000777ull);pb_u(out,3,1);
+                pb_u(out,1,3405340);pb_fixed64(out,2,lobbyCreatedId);pb_u(out,3,1);
                 return true;
             }
             if(emsg==steam_lobbies::GetLobbyData) {
-                std::string member;pb_fixed64(member,1,0x110000100000001ull);pb_s(member,2,"Fixture Owner");
-                pb_u(out,1,3405340);pb_fixed64(out,2,0x1100001000777ull);pb_u(out,4,4);pb_u(out,5,2);
-                pb_fixed64(out,7,0x110000100000001ull);pb_s(out,9,member);
+                // The settled lobby: real Valve-wrapped KeyValues, an owner with member
+                // data, and a peer, which the guest reads back through the phase-2 exports.
+                out=lobbyDataBody(lobbyCreatedId,{{"mode","coop"},{"map","alpha"}});
+                return true;
+            }
+            if(emsg==steam_lobbies::SetLobbyData) {
+                ++lobbySetData;
+                uint64_t lobby=0,member=0;std::string blob;
+                for(auto& f:pb_parse(body)){if(f.f==2)lobby=f.u;else if(f.f==3)member=f.u;else if(f.f==7)blob=f.s;}
+                pb_u(out,1,3405340);pb_u(out,3,1);
+                // The CM settles the first lobby-data write by adding a key of its own and
+                // pushing the lobby back (the game's LobbyDataUpdate_t). Once only: the
+                // later writes already carry that key.
+                auto kv=steam_lobbies::kv_decode(blob);
+                if(!member&&!kv.count("echo")) {
+                    kv["echo"]="1";
+                    play_runtime::matchmaking_push(steam_lobbies::LobbyData,lobbyDataBody(lobby,kv));
+                }
+                return true;
+            }
+            if(emsg==steam_lobbies::SendLobbyChatMsg) {
+                ++lobbyChats;
+                uint64_t lobby=0;std::string text;
+                for(auto& f:pb_parse(body)){if(f.f==2)lobby=f.u;else if(f.f==4)text=f.s;}
+                play_runtime::matchmaking_push(steam_lobbies::LobbyChatMsg,lobbyChatBody(lobby,lobbyOwnerId,text));
+                return true;
+            }
+            if(emsg==steam_lobbies::SetLobbyGameServer) {
+                ++lobbyServers;
+                // The pushed LobbyGameServerSet has the request's own fields.
+                play_runtime::matchmaking_push(steam_lobbies::LobbyGameServerSet,body);
+                return true;
+            }
+            if(emsg==steam_lobbies::InviteToLobby) {
+                // Counted only when it names this app, the lobby the guest is in and its peer.
+                uint64_t app=0,lobby=0,invitee=0;
+                for(auto& f:pb_parse(body)){if(f.f==1)app=f.u;else if(f.f==2)lobby=f.u;else if(f.f==3)invitee=f.u;}
+                if(app==3405340&&lobby==lobbyCreatedId&&invitee==lobbyPeerId)++lobbyInvites;
                 return true;
             }
             if(emsg==steam_lobbies::GetLobbyList) {
                 ++lobbyLists;
+                for(auto& f:pb_parse(body))if(f.f==6)++lobbyFilters;
                 pb_u(out,1,3405340);pb_u(out,3,1);
                 for(uint64_t id:{0x1100001000010ull,0x1100001000020ull}){std::string row;pb_fixed64(row,1,id);pb_s(out,4,row);}
                 return true;
@@ -589,6 +646,14 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
                 uint64_t id=0;for(auto& f:pb_parse(body))if(f.f==2)id=f.u;
                 pb_u(out,1,3405340);pb_fixed64(out,2,id);pb_u(out,3,1);pb_u(out,4,4);pb_u(out,5,2);
                 pb_fixed64(out,7,0x110000100000002ull);
+                {
+                    // The lobby's KeyValues and its two members, for the joined view.
+                    std::string host,self;
+                    pb_fixed64(host,1,0x110000100000002ull);pb_s(host,2,"Fixture Host");
+                    pb_fixed64(self,1,lobbyOwnerId);pb_s(self,2,"Fixture Owner");
+                    pb_s(out,8,steam_lobbies::kv_encode({{"mode","join"}}));
+                    pb_s(out,9,host);pb_s(out,9,self);
+                }
                 return true;
             }
             if(emsg==steam_lobbies::LeaveLobby) {
@@ -790,11 +855,14 @@ int WINAPI WinMain(HINSTANCE,HINSTANCE,LPSTR args,int){
         // handles the provider never saw) and the provider's own callbacks still
         // arrived once each. LeaveLobby has no result to wait on, so give the
         // executor's thread a moment to reach the CM before counting.
-        for(int i=0;i<150&&lobbyLeaves.load()<1;++i)Sleep(20);
-        printf("PLAY-LOBBIES creates=%d lists=%d joins=%d leaves=%d\n",lobbyCreates.load(),lobbyLists.load(),lobbyJoins.load(),lobbyLeaves.load());fflush(stdout);
+        // Likewise the phase-2 writes (data, chat, game server, invite): each ran on its
+        // own executor thread.
+        for(int i=0;i<150&&!(lobbyLeaves.load()>=1&&lobbySetData.load()>=4&&lobbyChats.load()>=1&&lobbyServers.load()>=1&&lobbyInvites.load()>=1);++i)Sleep(20);
+        printf("PLAY-LOBBIES creates=%d lists=%d joins=%d leaves=%d setdata=%d chats=%d servers=%d invites=%d filters=%d\n",lobbyCreates.load(),lobbyLists.load(),lobbyJoins.load(),lobbyLeaves.load(),lobbySetData.load(),lobbyChats.load(),lobbyServers.load(),lobbyInvites.load(),lobbyFilters.load());fflush(stdout);
         auto api=play_runtime::named(L"steam_api64.dll");
         ok=ok&&r->finished&&r->success&&r->code==42&&api&&api->mapped&&api->initialized&&
-            lobbyCreates==1&&lobbyLists==1&&lobbyJoins==1&&lobbyLeaves==1;
+            lobbyCreates==1&&lobbyLists==1&&lobbyJoins==1&&lobbyLeaves==1&&
+            lobbySetData==4&&lobbyChats==1&&lobbyServers==1&&lobbyInvites==1&&lobbyFilters==1;
     }
     else if(mode=="discord-sdk") {
         // Both Discord SDK flavours returned the answer they return with no
