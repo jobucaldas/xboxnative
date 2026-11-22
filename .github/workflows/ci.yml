@@ -485,6 +485,10 @@ jobs:
         run: bash src/xbox-test/app/tests/x86-com.sh
       - name: "x86 oleaut32 BSTR/VARIANT and COM proxy route contracts"
         run: bash src/xbox-test/app/tests/x86-oleaut.sh
+      - name: "x86 ole32 contracts and deferred DirectSound COM initialization (native and Wine)"
+        run: |
+          bash src/xbox-test/app/tests/x86-ole32.sh
+          bash src/xbox-test/app/tests/x86-ole32.sh --wine
       - name: "x86 launch route (i686 fixture through the launcher's PE32 entry point and result mapping)"
         run: bash src/xbox-test/app/tests/x86-launch-route.sh
       - name: "x86 API-set imports (api-ms-win-crt/core names bind by the documented policy; unmapped names stay unresolved; UCRT arity table)"

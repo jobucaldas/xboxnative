@@ -21,10 +21,11 @@ export WINEPREFIX
 mkdir -p "$WINEPREFIX"
 shim="$tmp/dsound"
 bash "$root/src/xbox-test/uwph/dsound/build.sh" "$shim"
-"$cc32" -std=c++17 -O1 -Wall -Wextra -Werror "${extra[@]}" -DX86_DSOUND_GUEST \
-  "$here/x86-dsound-integration.cpp" -o "$tmp/dsound-fixture.exe" -ldsound -luuid
+cp "$shim/dsound.dll" "$tmp/dsound-shim.dll"
+"$cc32" -std=c++17 -O1 -Wall -Wextra -Werror -static -static-libgcc -Wl,--no-seh "${extra[@]}" -DX86_DSOUND_GUEST \
+  "$here/x86-dsound-integration.cpp" -o "$tmp/dsound-fixture.exe" -ldsound -lole32 -luuid
 "$cc64" -std=c++17 -O1 -mno-red-zone -Wall -Wextra -Werror -Wno-error=cast-function-type -Wno-error=misleading-indentation -Wno-error=unused-parameter -Wno-error=sign-compare "${extra64[@]}" -static -static-libgcc -static-libstdc++ \
   "$here/x86-dsound-integration.cpp" -o "$tmp/x86-dsound-integration.exe" -lws2_32 -luuid
 wine="${WINE:-wine}"
 command -v "$wine" >/dev/null || { echo "X86-DSOUND FAIL: Wine not found" >&2; exit 1; }
-WINEDEBUG=-all "$wine" "$tmp/x86-dsound-integration.exe" "$shim/dsound.dll" "$tmp/dsound-fixture.exe"
+WINEDEBUG=-all "$wine" "$tmp/x86-dsound-integration.exe" "$tmp/dsound-shim.dll" "$tmp/dsound-fixture.exe"

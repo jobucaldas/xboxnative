@@ -4,6 +4,7 @@
 #ifdef X86_DSOUND_GUEST
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <objbase.h>
 #include <mmsystem.h>
 #include <initguid.h>
 #include <dsound.h>
@@ -14,6 +15,7 @@ int main() {
     IDirectSound8 *device = nullptr;
     HRESULT hr = DirectSoundCreate8(nullptr, &device, nullptr);
     if (FAILED(hr) || !device) return 10;
+    if (device->Initialize(nullptr) != DSERR_ALREADYINITIALIZED) return 33;
     if (FAILED(device->SetCooperativeLevel(reinterpret_cast<HWND>(1), DSSCL_PRIORITY))) return 11;
 
     DSBUFFERDESC primary_desc{};
@@ -116,7 +118,66 @@ int main() {
     CloseHandle(tail);
     CloseHandle(other);
     CloseHandle(event);
-    puts("X86-DSOUND PASS: create, wrap lock, looping cursor, controls, notify QI/event, WFMO, releases");
+    // Deferred COM path: CoCreateInstance(CLSID_DirectSound / CLSID_DirectSound8) must
+    // return an uninitialized proxy whose host device is created only in Initialize().
+    if (FAILED(CoInitialize(nullptr))) return 50;
+    IDirectSound *uninit_ds = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_DirectSound, nullptr, CLSCTX_INPROC_SERVER, IID_IDirectSound, reinterpret_cast<void **>(&uninit_ds))) || !uninit_ds) return 51;
+    if (uninit_ds->Compact() != DSERR_UNINITIALIZED) return 52;
+    if (uninit_ds->Release() != 0) return 53;
+
+    IUnknown *com_unk = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_DirectSound8, nullptr, CLSCTX_INPROC_SERVER, IID_IUnknown, reinterpret_cast<void **>(&com_unk))) || !com_unk) return 54;
+    IDirectSound8 *com_ds8 = nullptr;
+    if (FAILED(com_unk->QueryInterface(IID_IDirectSound8, reinterpret_cast<void **>(&com_ds8))) || !com_ds8) return 55;
+    IDirectSound *com_ds = nullptr;
+    if (FAILED(com_unk->QueryInterface(IID_IDirectSound, reinterpret_cast<void **>(&com_ds))) || !com_ds) return 56;
+
+    IDirectSoundBuffer *pre_buf = reinterpret_cast<IDirectSoundBuffer *>(1);
+    if (com_ds8->CreateSoundBuffer(&desc, &pre_buf, nullptr) != DSERR_UNINITIALIZED || pre_buf != nullptr) return 57;
+    DSCAPS caps{};
+    caps.dwSize = sizeof(caps);
+    if (com_ds8->GetCaps(&caps) != DSERR_UNINITIALIZED) return 58;
+    IDirectSoundBuffer *pre_dup = reinterpret_cast<IDirectSoundBuffer *>(1);
+    if (com_ds8->DuplicateSoundBuffer(nullptr, &pre_dup) != DSERR_UNINITIALIZED || pre_dup != nullptr) return 59;
+    if (com_ds8->SetCooperativeLevel(reinterpret_cast<HWND>(1), DSSCL_PRIORITY) != DSERR_UNINITIALIZED) return 60;
+    if (com_ds8->Compact() != DSERR_UNINITIALIZED) return 61;
+    DWORD spk = 0, cert = 0;
+    if (com_ds8->GetSpeakerConfig(&spk) != DSERR_UNINITIALIZED) return 62;
+    if (com_ds8->SetSpeakerConfig(DSSPEAKER_STEREO) != DSERR_UNINITIALIZED) return 63;
+    if (com_ds8->VerifyCertification(&cert) != DSERR_UNINITIALIZED) return 64;
+
+    const GUID bad_guid{0x12345678u, 0x1234u, 0x5678u, {1, 2, 3, 4, 5, 6, 7, 8}};
+    if (com_ds8->Initialize(&bad_guid) != DSERR_NODRIVER) return 65;
+    if (com_ds8->Compact() != DSERR_UNINITIALIZED) return 66;
+
+    if (FAILED(com_ds8->Initialize(nullptr))) return 67;
+    if (com_ds->Initialize(nullptr) != DSERR_ALREADYINITIALIZED) return 68;
+    if (com_ds8->Initialize(nullptr) != DSERR_ALREADYINITIALIZED) return 69;
+
+    IUnknown *com_unk2 = nullptr;
+    if (FAILED(com_ds8->QueryInterface(IID_IUnknown, reinterpret_cast<void **>(&com_unk2))) || com_unk2 != com_unk) return 70;
+    if (FAILED(com_ds8->SetCooperativeLevel(reinterpret_cast<HWND>(1), DSSCL_PRIORITY))) return 71;
+    if (FAILED(com_ds8->GetCaps(&caps)) || caps.dwFlags == 0) return 72;
+    if (FAILED(com_ds8->Compact())) return 73;
+    if (FAILED(com_ds8->GetSpeakerConfig(&spk)) || spk == 0) return 74;
+    if (FAILED(com_ds8->VerifyCertification(&cert))) return 75;
+
+    IDirectSoundBuffer *com_buf = nullptr;
+    if (FAILED(com_ds8->CreateSoundBuffer(&desc, &com_buf, nullptr)) || !com_buf) return 76;
+    void *c1 = nullptr, *c2 = nullptr;
+    DWORD cn1 = 0, cn2 = 0;
+    if (FAILED(com_buf->Lock(0, 256, &c1, &cn1, &c2, &cn2, 0)) || !c1 || cn1 != 256) return 77;
+    memset(c1, 0, cn1);
+    if (FAILED(com_buf->Unlock(c1, cn1, c2, cn2))) return 78;
+    com_buf->Release();
+    com_unk2->Release();
+    com_ds->Release();
+    com_ds8->Release();
+    if (com_unk->Release() != 0) return 79;
+    CoUninitialize();
+
+    puts("X86-DSOUND PASS: create, wrap lock, looping cursor, controls, notify QI/event, WFMO, CoCreateInstance deferred init, releases");
     return 0;
 }
 #else
@@ -168,13 +229,19 @@ int main(int argc, char **argv) {
     if (argc != 3) { std::fprintf(stderr, "usage: x86-dsound-integration <dsound.dll> <guest.exe>\n"); return 2; }
     HMODULE shim = LoadLibraryA(argv[1]);
     if (!shim) { std::fprintf(stderr, "FAIL: LoadLibrary dsound shim: %lu\n", GetLastError()); return 2; }
+    if (!GetProcAddress(shim, "XbnWaveOutGetNumDevs")) {
+        std::fprintf(stderr, "FAIL: loaded DLL is not Play's DirectSound shim (%s)\n", argv[1]);
+        return 2;
+    }
     std::ifstream f(argv[2], std::ios::binary);
     if (!f) { std::fprintf(stderr, "FAIL: cannot open guest fixture\n"); return 2; }
     std::vector<uint8_t> image{std::istreambuf_iterator<char>(f), {}};
     std::string output;
+    unsigned factory_calls = 0;
     auto result = x86::run_image(image, "dsound-fixture.exe", "dsound-fixture.exe", [&output](const std::string &s) { output += s; }, nullptr,
-        500ull * 1000 * 1000, nullptr, false, nullptr, nullptr, [shim](x86::Host &host) {
-            host.dsound_factory = [shim](const void *id, uintptr_t *out) -> uintptr_t {
+        500ull * 1000 * 1000, nullptr, false, nullptr, nullptr, [shim, &factory_calls](x86::Host &host) {
+            host.dsound_factory = [shim, &factory_calls](const void *id, uintptr_t *out) -> uintptr_t {
+                ++factory_calls;
                 using Create = HRESULT (WINAPI *)(LPCGUID, LPDIRECTSOUND8 *, LPUNKNOWN);
                 auto create = reinterpret_cast<Create>(GetProcAddress(shim, "DirectSoundCreate8"));
                 if (!out || !create) return E_NOINTERFACE;
@@ -187,10 +254,13 @@ int main(int argc, char **argv) {
         });
     if (!result.fault.empty()) std::fprintf(stderr, "X86-DSOUND FAIL: %s: %s\n", result.fault_kind.c_str(), result.fault.c_str());
     if (!output.empty()) std::fwrite(output.data(), 1, output.size(), stdout);
+    // Expected factory invocations: DirectSoundCreate8 (1), failed Initialize(&bad_guid) (1),
+    // and successful Initialize(nullptr) (1). Neither CoCreateInstance nor double-Initialize calls it.
     bool passed = result.loaded && result.finished && result.exit_code == 0 &&
+                  factory_calls == 3 &&
                   output.find("X86-DSOUND PASS:") != std::string::npos;
-    std::printf("X86-DSOUND %s: interpreter loaded=%d finished=%d exit=%u imports=%u bound=%u\n",
-                passed ? "PASS" : "FAIL", result.loaded, result.finished, result.exit_code, result.imports, result.bound);
+    std::printf("X86-DSOUND %s: interpreter loaded=%d finished=%d exit=%u imports=%u bound=%u factory_calls=%u\n",
+                passed ? "PASS" : "FAIL", result.loaded, result.finished, result.exit_code, result.imports, result.bound, factory_calls);
     FreeLibrary(shim);
     return passed ? 0 : 1;
 }
