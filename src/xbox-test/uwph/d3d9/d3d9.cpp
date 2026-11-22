@@ -908,6 +908,99 @@ struct PixelShader : d3dshim::Base, IDirect3DPixelShader9 {
 }
 
 namespace {
+// ------------------------------------------------------------------- queries
+// What each D3D9 query type is made of in D3D11. TIMESTAMPFREQ is the
+// frequency half of a D3D11 disjoint query, which D3D11 only answers for a
+// Begin/End pair; the shim brackets it itself, so the guest still issues END.
+struct QueryTraits {
+    D3D11_QUERY kind;
+    DWORD dataSize;     // what IDirect3DQuery9::GetDataSize reports
+    bool beginnable;    // D3DISSUE_BEGIN is valid for this type
+    bool bracketed;     // D3D11 needs Begin before End
+};
+inline bool queryTraits(D3DQUERYTYPE type,QueryTraits* out) {
+    switch(type) {
+    case D3DQUERYTYPE_EVENT:             *out={D3D11_QUERY_EVENT,sizeof(BOOL),false,false};return true;
+    case D3DQUERYTYPE_OCCLUSION:         *out={D3D11_QUERY_OCCLUSION,sizeof(DWORD),true,true};return true;
+    case D3DQUERYTYPE_TIMESTAMP:         *out={D3D11_QUERY_TIMESTAMP,sizeof(UINT64),false,false};return true;
+    case D3DQUERYTYPE_TIMESTAMPDISJOINT: *out={D3D11_QUERY_TIMESTAMP_DISJOINT,sizeof(BOOL),true,true};return true;
+    case D3DQUERYTYPE_TIMESTAMPFREQ:     *out={D3D11_QUERY_TIMESTAMP_DISJOINT,sizeof(UINT64),false,true};return true;
+    default: return false;
+    }
+}
+
+// The query holds its device strongly (Base::owner), unlike the surfaces and
+// swap chain above: the device keeps no reference to a query, so there is no
+// cycle, and the query's context pointer stays valid for as long as it lives.
+struct Query : d3dshim::Base, IDirect3DQuery9 {
+    Query() { self=static_cast<IDirect3DQuery9*>(this);
+        D3DSHIM_IDS(&__uuidof(IDirect3DQuery9)); }
+    D3DSHIM_REF
+    D3DSHIM_QI
+    ID3D11Query* query=nullptr;   // also `inner`
+    D3DQUERYTYPE type=D3DQUERYTYPE_EVENT;
+    QueryTraits traits{};
+    bool begun=false;   // BEGIN issued and not yet ended
+    bool ended=false;   // an END has been issued, so D3D11 has a result to give
+    HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9** out) override {
+        if(!out)return D3DERR_INVALIDCALL;
+        *out=static_cast<IDirect3DDevice9*>(owner);
+        (*out)->AddRef();
+        return D3D_OK;
+    }
+    D3DQUERYTYPE STDMETHODCALLTYPE GetType() override { return type; }
+    DWORD STDMETHODCALLTYPE GetDataSize() override { return traits.dataSize; }
+    HRESULT STDMETHODCALLTYPE Issue(DWORD flags) override {
+        if(flags!=D3DISSUE_BEGIN&&flags!=D3DISSUE_END)return D3DERR_INVALIDCALL;
+        if(flags==D3DISSUE_BEGIN) {
+            if(!traits.beginnable)return D3DERR_INVALIDCALL;
+            // D3D9 lets a new BEGIN restart the count; D3D11 wants the open
+            // query ended first.
+            if(begun)context->End(query);
+            context->Begin(query);
+            begun=true;ended=false;
+            return D3D_OK;
+        }
+        // D3D11 refuses an End with no Begin for the bracketed kinds; D3D9
+        // lets a lone END through, and its answer is an empty interval.
+        if(traits.bracketed&&!begun)context->Begin(query);
+        context->End(query);
+        begun=false;ended=true;
+        return D3D_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetData(void* data,DWORD size,DWORD flags) override {
+        if(flags&~DWORD(D3DGETDATA_FLUSH))return D3DERR_INVALIDCALL;
+        if(size&&!data)return D3DERR_INVALIDCALL;
+        UINT64 value=0;
+        if(begun)return S_FALSE;   // no END yet: D3D11 has nothing to read
+        if(!ended) {
+            // Never issued: D3D9 reports it complete, an event as signalled.
+            if(type==D3DQUERYTYPE_EVENT)value=TRUE;
+        } else {
+            const UINT asyncFlags=(flags&D3DGETDATA_FLUSH)?0u:UINT(D3D11_ASYNC_GETDATA_DONOTFLUSH);
+            if(!data||!size) {   // readiness only
+                HRESULT ready=context->GetData(query,nullptr,0,asyncFlags);
+                return ready==S_OK||ready==S_FALSE?ready:D3DERR_INVALIDCALL;
+            }
+            union { BOOL event; UINT64 count; D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint; } raw{};
+            HRESULT hr=context->GetData(query,&raw,query->GetDataSize(),asyncFlags);
+            if(hr!=S_OK)return hr==S_FALSE?S_FALSE:D3DERR_INVALIDCALL;
+            switch(type) {
+            case D3DQUERYTYPE_EVENT:             value=DWORD(raw.event);break;
+            // D3D11 counts samples in 64 bits, D3D9 in 32: saturate.
+            case D3DQUERYTYPE_OCCLUSION:         value=raw.count>0xffffffffull?0xffffffffull:raw.count;break;
+            case D3DQUERYTYPE_TIMESTAMP:         value=raw.count;break;
+            case D3DQUERYTYPE_TIMESTAMPDISJOINT: value=DWORD(raw.disjoint.Disjoint);break;
+            default:                             value=raw.disjoint.Frequency;break;
+            }
+        }
+        if(data&&size)memcpy(data,&value,size<traits.dataSize?size:traits.dataSize);
+        return S_OK;
+    }
+};
+}
+
+namespace {
 // ---------------------------------------------------------------- swap chain
 struct SwapChain : d3dshim::Base, IDirect3DSwapChain9 {
     SwapChain() { self=static_cast<IDirect3DSwapChain9*>(this);
@@ -2662,10 +2755,30 @@ struct Device : d3dshim::Base, IDirect3DDevice9Ex {
     HRESULT STDMETHODCALLTYPE DrawRectPatch(UINT,const float*,const D3DRECTPATCH_INFO*) override { return D3DERR_INVALIDCALL; }
     HRESULT STDMETHODCALLTYPE DrawTriPatch(UINT,const float*,const D3DTRIPATCH_INFO*) override { return D3DERR_INVALIDCALL; }
     HRESULT STDMETHODCALLTYPE DeletePatch(UINT) override { return D3DERR_INVALIDCALL; }
-    HRESULT STDMETHODCALLTYPE CreateQuery(D3DQUERYTYPE,IDirect3DQuery9** out) override {
+    HRESULT STDMETHODCALLTYPE CreateQuery(D3DQUERYTYPE type,IDirect3DQuery9** out) override {
         if(out)*out=nullptr;
-        d3dshim::noteOnce("D3D9 shim: queries are not implemented");
-        return D3DERR_INVALIDCALL;
+        QueryTraits traits{};
+        if(!queryTraits(type,&traits)) {
+            d3dshim::noteOnce("D3D9 shim: this query type is not implemented");
+            return D3DERR_NOTAVAILABLE;
+        }
+        const D3D11_QUERY_DESC desc{traits.kind,0};
+        // A null `out` is D3D9's support probe; D3D11 answers it the same way
+        // (S_FALSE for a valid description), so nothing is created.
+        ID3D11Query* query=nullptr;
+        if(FAILED(device()->CreateQuery(&desc,out?&query:nullptr)))return D3DERR_NOTAVAILABLE;
+        if(!out)return D3D_OK;
+        auto wrapper=d3dshim::create<Query>();
+        if(!wrapper){query->Release();return E_OUTOFMEMORY;}
+        wrapper->query=query;
+        wrapper->inner=query;
+        wrapper->type=type;
+        wrapper->traits=traits;
+        wrapper->context=context();
+        wrapper->owner=static_cast<IDirect3DDevice9*>(self);
+        wrapper->owner->AddRef();
+        *out=wrapper;
+        return D3D_OK;
     }
 
     // ------------------------------------------------------------ IDirect3D9Ex
