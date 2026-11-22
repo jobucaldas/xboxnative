@@ -1234,6 +1234,126 @@ static void testStateBlockScissors(ID3D10Device* device,CreateStateBlock createS
     device->ClearState();
 }
 
+// ------------------------------- state block release, device and counts
+// ReleaseAllDeviceObjects drops the captured pipeline objects but keeps the
+// device; Capture/Apply restore exactly the viewport and scissor counts bound.
+static void testStateBlockRelease(ID3D10Device* device,CreateStateBlock createStateBlock,EnableAll enableAll) {
+    D3D10_TEXTURE2D_DESC td{};td.Width=16;td.Height=16;td.MipLevels=1;td.ArraySize=1;
+    td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.SampleDesc.Count=1;td.Usage=D3D10_USAGE_DEFAULT;
+    td.BindFlags=D3D10_BIND_RENDER_TARGET;
+    ID3D10Texture2D* texture=nullptr;ID3D10RenderTargetView* rtv=nullptr;
+    CHECK_HR(device->CreateTexture2D(&td,nullptr,&texture));
+    if(texture)CHECK_HR(device->CreateRenderTargetView(texture,nullptr,&rtv));
+    D3D10_BUFFER_DESC bd{};bd.ByteWidth=64;bd.Usage=D3D10_USAGE_DEFAULT;bd.BindFlags=D3D10_BIND_VERTEX_BUFFER;
+    ID3D10Buffer* vb=nullptr;
+    CHECK_HR(device->CreateBuffer(&bd,nullptr,&vb));
+    D3D10_SAMPLER_DESC sd{};sd.Filter=D3D10_FILTER_MIN_MAG_MIP_POINT;sd.AddressU=sd.AddressV=sd.AddressW=D3D10_TEXTURE_ADDRESS_CLAMP;
+    sd.ComparisonFunc=D3D10_COMPARISON_NEVER;sd.MaxLOD=D3D10_FLOAT32_MAX;
+    ID3D10SamplerState* sampler=nullptr;
+    CHECK_HR(device->CreateSamplerState(&sd,&sampler));
+    D3D10_RASTERIZER_DESC rd{};rd.FillMode=D3D10_FILL_SOLID;rd.CullMode=D3D10_CULL_NONE;rd.DepthClipEnable=TRUE;
+    ID3D10RasterizerState* raster=nullptr;
+    CHECK_HR(device->CreateRasterizerState(&rd,&raster));
+    if(!rtv||!vb||!sampler||!raster) {
+        RELEASE(raster);RELEASE(sampler);RELEASE(vb);RELEASE(rtv);RELEASE(texture);
+        return;
+    }
+    const UINT stride=16,offset=0;
+    device->OMSetRenderTargets(1,&rtv,nullptr);
+    device->IASetVertexBuffers(0,1,&vb,&stride,&offset);
+    device->PSSetSamplers(0,1,&sampler);
+    device->RSSetState(raster);
+    D3D10_VIEWPORT viewports[2]={{0,0,16,16,0.0f,1.0f},{1,2,8,8,0.0f,1.0f}};
+    D3D10_RECT rects[2]={{1,2,3,4},{5,6,7,8}};
+    device->RSSetViewports(2,viewports);
+    device->RSSetScissorRects(2,rects);
+    const ULONG rtvBase=refs(rtv),vbBase=refs(vb),samplerBase=refs(sampler),rasterBase=refs(raster);
+
+    D3D10_STATE_BLOCK_MASK mask{};
+    CHECK_HR(enableAll(&mask));
+    const ULONG deviceBase=refs(device);
+    ID3D10StateBlock* block=nullptr;
+    CHECK_HR(createStateBlock(device,&mask,&block));
+    if(block) {
+        CHECK(refs(device)==deviceBase+1);
+        ID3D10Device* got=nullptr;
+        CHECK_HR(block->GetDevice(&got));
+        CHECK(got==device&&refs(device)==deviceBase+2);
+        RELEASE(got);
+        CHECK_HR_IS(block->GetDevice(nullptr),E_INVALIDARG);
+
+        CHECK_HR(block->Capture());
+        CHECK(refs(rtv)>rtvBase&&refs(vb)>vbBase&&refs(sampler)>samplerBase&&refs(raster)>rasterBase);
+        // Two viewports and two rects are captured, not all sixteen.
+        device->ClearState();
+        CHECK_HR(block->Apply());
+        UINT vpCount=0,rectCount=0;
+        device->RSGetViewports(&vpCount,nullptr);
+        device->RSGetScissorRects(&rectCount,nullptr);
+        CHECK(vpCount==2&&rectCount==2);
+        D3D10_VIEWPORT gotViewports[2]{};D3D10_RECT gotRects[2]{};
+        vpCount=rectCount=2;
+        device->RSGetViewports(&vpCount,gotViewports);
+        device->RSGetScissorRects(&rectCount,gotRects);
+        CHECK(gotViewports[1].TopLeftX==1&&gotViewports[1].TopLeftY==2&&gotViewports[1].Width==8);
+        CHECK(gotRects[1].left==5&&gotRects[1].bottom==8);
+        // One viewport and one rect round-trip as one each.
+        device->RSSetViewports(1,viewports);
+        device->RSSetScissorRects(1,rects);
+        CHECK_HR(block->Capture());
+        device->ClearState();
+        CHECK_HR(block->Apply());
+        vpCount=rectCount=0;
+        device->RSGetViewports(&vpCount,nullptr);
+        device->RSGetScissorRects(&rectCount,nullptr);
+        CHECK(vpCount==1&&rectCount==1);
+
+        // Releasing drops the pipeline references now, keeps the device, and
+        // is idempotent. The earlier captures still hold references, so drop
+        // them before measuring the guest-and-pipeline baseline.
+        CHECK_HR(block->ReleaseAllDeviceObjects());
+        device->ClearState();
+        device->RSSetViewports(2,viewports);
+        device->RSSetScissorRects(2,rects);
+        device->OMSetRenderTargets(1,&rtv,nullptr);
+        device->IASetVertexBuffers(0,1,&vb,&stride,&offset);
+        device->PSSetSamplers(0,1,&sampler);
+        device->RSSetState(raster);
+        const ULONG rtvBound=refs(rtv),vbBound=refs(vb),samplerBound=refs(sampler),rasterBound=refs(raster);
+        CHECK_HR(block->Capture());
+        CHECK(refs(rtv)>rtvBound&&refs(vb)>vbBound);
+        CHECK_HR(block->ReleaseAllDeviceObjects());
+        CHECK(refs(rtv)==rtvBound&&refs(vb)==vbBound&&refs(sampler)==samplerBound&&refs(raster)==rasterBound);
+        CHECK_HR(block->ReleaseAllDeviceObjects());
+        CHECK(refs(rtv)==rtvBound&&refs(vb)==vbBound);
+        CHECK(refs(device)==deviceBase+1);
+        CHECK_HR(block->GetDevice(&got));
+        CHECK(got==device);
+        RELEASE(got);
+        // Apply after the release binds nulls for the released slots; Capture
+        // after it works normally.
+        CHECK_HR(block->Apply());
+        ID3D10RenderTargetView* boundRtv=nullptr;
+        device->OMGetRenderTargets(1,&boundRtv,nullptr);
+        CHECK(boundRtv==nullptr);
+        RELEASE(boundRtv);
+        device->OMSetRenderTargets(1,&rtv,nullptr);
+        CHECK_HR(block->Capture());
+        CHECK(refs(rtv)>rtvBound);
+        device->ClearState();
+        CHECK_HR(block->Apply());
+        device->OMGetRenderTargets(1,&boundRtv,nullptr);
+        CHECK(boundRtv==rtv);
+        RELEASE(boundRtv);
+
+        block->Release();
+        CHECK(refs(device)==deviceBase);
+        CHECK(refs(rtv)==rtvBound);
+    }
+    device->ClearState();
+    RELEASE(raster);RELEASE(sampler);RELEASE(vb);RELEASE(rtv);RELEASE(texture);
+}
+
 extern "C" DWORD WINAPI d3d10_test_entry() {
     AddVectoredExceptionHandler(1,captureDebugString);
     HMODULE module=loadShim();
@@ -1540,7 +1660,7 @@ extern "C" DWORD WINAPI d3d10_test_entry() {
     if(block) {
         CHECK_HR(block->Capture());
         CHECK_HR(block->Apply());
-        CHECK_HR_IS(block->GetDevice(nullptr),E_NOTIMPL);
+        CHECK_HR_IS(block->GetDevice(nullptr),E_INVALIDARG);
         block->Release();
     }
 
@@ -1696,6 +1816,7 @@ extern "C" DWORD WINAPI d3d10_test_entry() {
     out("INFO group shader-tools\n");testShaderTools(device);
     out("INFO group adopted-objects\n");testAdoptedObjects(device);
     out("INFO group state-block-scissors\n");testStateBlockScissors(device,createStateBlock,enableAll);
+    out("INFO group state-block-release\n");testStateBlockRelease(device,createStateBlock,enableAll);
     out("INFO groups done\n");
     device->ClearState();
     device->Flush();

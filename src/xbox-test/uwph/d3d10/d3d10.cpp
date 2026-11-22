@@ -1610,6 +1610,7 @@ struct StateBlock : d3dshim::Base, ID3D10StateBlock {
     UINT sampleMask=0;
     D3D10_VIEWPORT viewports[D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
     D3D10_RECT scissorRects[D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    UINT viewportCount=0,scissorRectCount=0;
     ID3D10RasterizerState* rasterizerState=nullptr;
     ID3D10Buffer* streamOutput[D3D10_SO_BUFFER_SLOT_COUNT]{};
     UINT streamOutputOffsets[D3D10_SO_BUFFER_SLOT_COUNT]{};
@@ -1632,7 +1633,6 @@ struct StateBlock : d3dshim::Base, ID3D10StateBlock {
         return index<fieldSize&&(field[index>>3]&(1<<(index&7)));
     }
     HRESULT STDMETHODCALLTYPE Capture() override {
-        unsigned count=D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
         cleanup();
         if(mask.VS)device->VSGetShader(&vs);
         for(unsigned i=0;i<D3D10_COMMONSHADER_SAMPLER_SLOT_COUNT;++i)
@@ -1664,9 +1664,11 @@ struct StateBlock : d3dshim::Base, ID3D10StateBlock {
         if(mask.OMRenderTargets)device->OMGetRenderTargets(D3D10_SIMULTANEOUS_RENDER_TARGET_COUNT,renderTargets,&depthStencilView);
         if(mask.OMDepthStencilState)device->OMGetDepthStencilState(&depthStencilState,&stencilReference);
         if(mask.OMBlendState)device->OMGetBlendState(&blendState,blendFactor,&sampleMask);
-        if(mask.RSViewports)device->RSGetViewports(&count,viewports);
-        count=D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;   // the call above wrote the bound count back
-        if(mask.RSScissorRects)device->RSGetScissorRects(&count,scissorRects);
+        // Each query writes the bound count back, so reset it per call and keep
+        // the result: Apply() must restore exactly that many, not all 16.
+        viewportCount=scissorRectCount=D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        if(mask.RSViewports)device->RSGetViewports(&viewportCount,viewports);
+        if(mask.RSScissorRects)device->RSGetScissorRects(&scissorRectCount,scissorRects);
         if(mask.RSRasterizerState)device->RSGetState(&rasterizerState);
         if(mask.SOBuffers)device->SOGetTargets(D3D10_SO_BUFFER_SLOT_COUNT,streamOutput,streamOutputOffsets);
         if(mask.Predication)device->GetPredication(&predicate,&predicateValue);
@@ -1703,16 +1705,23 @@ struct StateBlock : d3dshim::Base, ID3D10StateBlock {
         if(mask.OMRenderTargets)device->OMSetRenderTargets(D3D10_SIMULTANEOUS_RENDER_TARGET_COUNT,renderTargets,depthStencilView);
         if(mask.OMDepthStencilState)device->OMSetDepthStencilState(depthStencilState,stencilReference);
         if(mask.OMBlendState)device->OMSetBlendState(blendState,blendFactor,sampleMask);
-        if(mask.RSViewports)device->RSSetViewports(D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE,viewports);
-        if(mask.RSScissorRects)device->RSSetScissorRects(D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE,scissorRects);
+        if(mask.RSViewports)device->RSSetViewports(viewportCount,viewports);
+        if(mask.RSScissorRects)device->RSSetScissorRects(scissorRectCount,scissorRects);
         if(mask.RSRasterizerState)device->RSSetState(rasterizerState);
         if(mask.SOBuffers)device->SOSetTargets(D3D10_SO_BUFFER_SLOT_COUNT,streamOutput,streamOutputOffsets);
         if(mask.Predication)device->SetPredication(predicate,predicateValue);
         return S_OK;
     }
-    // Wine leaves both of these unimplemented; so does this.
-    HRESULT STDMETHODCALLTYPE ReleaseAllDeviceObjects() override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetDevice(ID3D10Device** out) override { return E_NOTIMPL; }
+    // Drops every captured pipeline object (games call this before ResizeBuffers)
+    // but keeps the device, which Capture() and GetDevice() still need. Apply()
+    // afterwards binds nulls for the released slots.
+    HRESULT STDMETHODCALLTYPE ReleaseAllDeviceObjects() override { cleanup();return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetDevice(ID3D10Device** out) override {
+        if(!out)return E_INVALIDARG;
+        *out=device;
+        if(*out)(*out)->AddRef();
+        return S_OK;
+    }
 };
 }
 
