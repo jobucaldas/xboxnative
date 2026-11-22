@@ -544,14 +544,22 @@ grep -qE 'PLAY-OPENGL STAGE swap-interval (set=1 got=1|skipped)' "$out/opengl.lo
 # Wine is reported explicitly as SKIP (wine), never as a pass; unexpected stage
 # failures remain failures.
 grep '^PLAY-OPENGL STAGE ' "$out/opengl.log"
+# wglShareLists and BC1 need no 4.1 driver, so they run on every host: the shared
+# VBO and texture must draw through the second context, and BC1 must read back its
+# decoded palette or report skipped when S3TC is absent (a platform limit, not a pass).
+grep -q 'PLAY-OPENGL STAGE share-lists-error-path null=0 stale=0 ' "$out/opengl.log"
+grep -q 'PLAY-OPENGL STAGE share-lists-draw exit=0 shared-buffer-and-texture readback=64,128,192,255' "$out/opengl.log"
+if grep -q 'PLAY-OPENGL STAGE bc1-sampled-readback skipped (GL_EXT_texture_compression_s3tc absent)' "$out/opengl.log"; then
+  echo "PLAY-OPENGL bc1-sampled-readback skipped (S3TC absent); not a pass"
+else
+  grep -q 'PLAY-OPENGL STAGE bc1-sampled-readback exit=0 format=BC1 internal=0x83F0 rows=4' "$out/opengl.log"
+fi
 opengl_wine_skip=0
-if grep -qE 'PLAY-OPENGL STAGE (core41-draw|bc1-sampled-readback|msaa-resolve-readback) exit=43 stage-code=[0-9]+ SKIP \(wine\):' "$out/opengl.log"; then
-  grep -E 'PLAY-OPENGL STAGE (core41-draw|bc1-sampled-readback|msaa-resolve-readback) exit=43 stage-code=[0-9]+ SKIP \(wine\):' "$out/opengl.log"
+if grep -qE 'PLAY-OPENGL STAGE (core41-draw|msaa-resolve-readback) exit=43 stage-code=[0-9]+ SKIP \(wine\):' "$out/opengl.log"; then
+  grep -E 'PLAY-OPENGL STAGE (core41-draw|msaa-resolve-readback) exit=43 stage-code=[0-9]+ SKIP \(wine\):' "$out/opengl.log"
   echo "PLAY-OPENGL new stages SKIP (wine); not a pass"
   opengl_wine_skip=1
 else
-  grep -q 'PLAY-OPENGL STAGE share-lists-draw exit=0 shared-buffer-and-texture readback=64,128,192,255' "$out/opengl.log"
-  grep -q 'PLAY-OPENGL STAGE bc1-sampled-readback exit=0 format=BC1 got=255,0,0,255' "$out/opengl.log"
   grep -q 'PLAY-OPENGL STAGE resize-framebuffer exit=0 client-size-and-readback=0,128,64,255' "$out/opengl.log"
   grep -q 'PLAY-OPENGL STAGE core41-draw exit=0 requested=4.1 version="4\.[1-9]' "$out/opengl.log"
   grep -q 'PLAY-OPENGL STAGE core41-draw exit=0 requested=4.1 version=".*" got=64,128,192,255' "$out/opengl.log"

@@ -138,6 +138,14 @@ typedef void (WINAPI* PFN_glRenderbufferStorageMultisample)(uint32_t, int, uint3
 typedef void (WINAPI* PFN_glFramebufferRenderbuffer)(uint32_t, uint32_t, uint32_t, uint32_t);
 typedef void (WINAPI* PFN_glBlitFramebuffer)(int, int, int, int, int, int, int, int, uint32_t, uint32_t);
 typedef void (WINAPI* PFN_glDeleteRenderbuffers)(int, const uint32_t*);
+// Fixed-function path the share-lists and BC1 stages draw with (GL 1.1 exports).
+typedef uint32_t (WINAPI* PFN_glGetError)(void);
+typedef void (WINAPI* PFN_glEnable)(uint32_t);
+typedef void (WINAPI* PFN_glDisable)(uint32_t);
+typedef void (WINAPI* PFN_glEnableClientState)(uint32_t);
+typedef void (WINAPI* PFN_glDisableClientState)(uint32_t);
+typedef void (WINAPI* PFN_glVertexPointer)(int, uint32_t, int, const void*);
+typedef void (WINAPI* PFN_glTexCoordPointer)(int, uint32_t, int, const void*);
 
 enum : uint32_t { GL_VENDOR = 0x1F00, GL_RENDERER = 0x1F01, GL_VERSION = 0x1F02,
                   GL_COLOR_BUFFER_BIT = 0x00004000 };
@@ -166,8 +174,10 @@ enum : int { WGL_TYPE_RGBA_ARB = 0x202B };
 enum : uint32_t { GL_PIXEL_PACK_BUFFER = 0x88EB,
                   GL_READ_ONLY = 0x88B8,
                   GL_BUFFER_SIZE = 0x8764 };
-enum : uint32_t { GL_COMPRESSED_RGBA_S3TC_DXT1_EXT = 0x83F1,
-                  GL_RENDERBUFFER = 0x8D41 };
+enum : uint32_t { GL_COMPRESSED_RGB_S3TC_DXT1_EXT = 0x83F0,
+                  GL_RENDERBUFFER = 0x8D41,
+                  GL_TEXTURE_MAG_FILTER = 0x2800,
+                  GL_VERTEX_ARRAY = 0x8074, GL_TEXTURE_COORD_ARRAY = 0x8078 };
 
 int opengl_anchor;
 void* opengl_relocation = &opengl_anchor;
@@ -722,20 +732,168 @@ int opengl_entry() {
         p = append(p, name); p = append(p, " exit=0 "); p = append(p, result);
         p = append(p, "\n"); *p = 0; emit(line);
     };
+    // A platform limit, not a verdict: reported like swap-interval's skipped line.
+    auto stageSkip = [&](const char* name, const char* reason) {
+        char line[256]; char* p = append(line, "PLAY-OPENGL STAGE ");
+        p = append(p, name); p = append(p, " skipped ("); p = append(p, reason);
+        p = append(p, ")\n"); *p = 0; emit(line);
+    };
     const char* compatExtensions = glGetString(0x1F03);
     bool hasS3tc = contains(compatExtensions, "GL_EXT_texture_compression_s3tc") ||
                    contains(compatExtensions, "GL_EXT_texture_compression_dxt1");
+
+    // wglShareLists and BC1 run on plain compatibility contexts through the
+    // fixed-function path, ahead of the 4.1 core request below: neither needs a
+    // 4.1 driver, so a host capped at GL 2.1 still exercises them.
+    {
+        auto core = [&](const char* name) -> uintptr_t { return (uintptr_t)GetProcAddress(gl, name); };
+        auto ext = [&](const char* name) -> uintptr_t { return (uintptr_t)(void*)wglGetProcAddress(name); };
+        auto getError = (PFN_glGetError)core("glGetError");
+        auto glEnable = (PFN_glEnable)core("glEnable");
+        auto glDisable = (PFN_glDisable)core("glDisable");
+        auto enableClient = (PFN_glEnableClientState)core("glEnableClientState");
+        auto disableClient = (PFN_glDisableClientState)core("glDisableClientState");
+        auto vertexPointer = (PFN_glVertexPointer)core("glVertexPointer");
+        auto texCoordPointer = (PFN_glTexCoordPointer)core("glTexCoordPointer");
+        auto drawArrays = (PFN_glDrawArrays)core("glDrawArrays");
+        auto genTextures = (PFN_glGenTextures)core("glGenTextures");
+        auto bindTexture = (PFN_glBindTexture)core("glBindTexture");
+        auto texImage = (PFN_glTexImage2D)core("glTexImage2D");
+        auto texParameteri = (PFN_glTexParameteri)core("glTexParameteri");
+        auto deleteTextures = (PFN_glDeleteTextures)core("glDeleteTextures");
+        auto shareLists = (PFN_wglShareLists)core("wglShareLists");
+        auto genBuffers = (PFN_glGenBuffers)ext("glGenBuffers");
+        auto bindBuffer = (PFN_glBindBuffer)ext("glBindBuffer");
+        auto bufferData = (PFN_glBufferData)ext("glBufferData");
+        auto deleteBuffers = (PFN_glDeleteBuffers)ext("glDeleteBuffers");
+        if (!getError || !glEnable || !glDisable || !enableClient || !disableClient || !vertexPointer ||
+            !texCoordPointer || !drawArrays || !genTextures || !bindTexture || !texImage ||
+            !texParameteri || !deleteTextures || !genBuffers || !bindBuffer || !bufferData || !deleteBuffers)
+            return stageFailure("share-lists-draw", 20, "fixed-function-entry-point-missing");
+        if (!shareLists) return stageFailure("share-lists-draw", 20, "wglShareLists-export-missing");
+
+        // One full-viewport triangle as x, y, u, v: u and v run 0..1 across the
+        // viewport. `base` is a client pointer, or a byte offset into the bound
+        // GL_ARRAY_BUFFER. The data is static const so no CRT copy is needed.
+        static const float triangle[12] = {-1.0f,-1.0f,0.0f,0.0f, 3.0f,-1.0f,2.0f,0.0f, -1.0f,3.0f,0.0f,2.0f};
+        auto drawTextured = [&](uint32_t texture, uintptr_t base) {
+            glEnable(GL_TEXTURE_2D); bindTexture(GL_TEXTURE_2D, texture);
+            enableClient(GL_VERTEX_ARRAY); enableClient(GL_TEXTURE_COORD_ARRAY);
+            vertexPointer(2, GL_FLOAT, 16, (const void*)base);
+            texCoordPointer(2, GL_FLOAT, 16, (const void*)(base + 8));
+            drawArrays(GL_TRIANGLES, 0, 3); glFinish();
+            disableClient(GL_TEXTURE_COORD_ARRAY); disableClient(GL_VERTEX_ARRAY);
+            glDisable(GL_TEXTURE_2D);
+        };
+
+        // wglShareLists: a VBO and a texture created in context A are drawn from
+        // context B. The error path comes first: a NULL source and a deleted
+        // destination must both fail, and neither may link A and B.
+        HANDLE_GL ctxA = wglCreateContext(dc), ctxB = wglCreateContext(dc), stale = wglCreateContext(dc);
+        if (!ctxA || !ctxB || !stale) return stageFailure("share-lists-draw", 20, "context-create-failed");
+        wglDeleteContext(stale);
+        SetLastError(0);
+        BOOL nullShared = shareLists(nullptr, ctxB);
+        SetLastError(0);
+        BOOL staleShared = shareLists(ctxA, stale);
+        DWORD staleError = GetLastError();
+        {char line[160]; char* p = append(line, "PLAY-OPENGL STAGE share-lists-error-path null=");
+         p = appendInt(p, nullShared ? 1 : 0); p = append(p, " stale="); p = appendInt(p, staleShared ? 1 : 0);
+         p = append(p, " error="); p = appendInt(p, (int32_t)staleError); p = append(p, "\n"); *p = 0; emit(line);}
+        if (nullShared || staleShared) return stageFailure("share-lists-draw", 20, "invalid-handle-share-succeeded");
+        if (!shareLists(ctxA, ctxB)) return stageFailure("share-lists-draw", 20, "context-share-failed");
+        if (!wglMakeCurrent(dc, ctxA)) return stageFailure("share-lists-draw", 20, "make-a-current-failed");
+        uint32_t sharedVbo = 0, sharedTex = 0;
+        genBuffers(1, &sharedVbo); bindBuffer(GL_ARRAY_BUFFER, sharedVbo);
+        bufferData(GL_ARRAY_BUFFER, (intptr_t)sizeof triangle, triangle, GL_STATIC_DRAW);
+        genTextures(1, &sharedTex); bindTexture(GL_TEXTURE_2D, sharedTex);
+        static const unsigned char sharedTexel[4] = {64,128,192,255};
+        texImage(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, sharedTexel);
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glFinish();
+        if (!wglMakeCurrent(dc, ctxB)) return stageFailure("share-lists-draw", 20, "make-b-current-failed");
+        bindBuffer(GL_ARRAY_BUFFER, sharedVbo);
+        glViewport(0, 0, 4, 4);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);   // a missed draw reads back black
+        drawTextured(sharedTex, 0);
+        unsigned char sharedGot[4] = {0,0,0,0};
+        glReadPixels(2, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, sharedGot);
+        bindBuffer(GL_ARRAY_BUFFER, 0);
+        {char line[192]; char* p = append(line, "PLAY-OPENGL STAGE share-lists-readback got=");
+         p = appendInt(p, sharedGot[0]); *p++ = ','; p = appendInt(p, sharedGot[1]); *p++ = ',';
+         p = appendInt(p, sharedGot[2]); *p++ = ','; p = appendInt(p, sharedGot[3]);
+         p = append(p, " want=64,128,192,255\n"); *p = 0; emit(line);}
+        if (sharedGot[0] != 64 || sharedGot[1] != 128 || sharedGot[2] != 192 || sharedGot[3] != 255)
+            return stageFailure("share-lists-draw", 20, "shared-object-readback-mismatch");
+        stagePass("share-lists-draw", "shared-buffer-and-texture readback=64,128,192,255");
+        if (!wglMakeCurrent(dc, ctxA)) return stageFailure("share-lists-draw", 20, "make-a-current-failed");
+        deleteTextures(1, &sharedTex); deleteBuffers(1, &sharedVbo);
+        wglMakeCurrent(nullptr, nullptr);
+        wglDeleteContext(ctxB); wglDeleteContext(ctxA);
+        if (!wglMakeCurrent(dc, context)) return fail(18, "restore compat context", GetLastError());
+
+        // BC1 (S3TC DXT1, RGB): one 4x4 block whose four rows use the four
+        // palette entries, sampled one pixel per texel in a 4x4 viewport. Without
+        // the extension the stage reports skipped, never a pass.
+        if (!hasS3tc) {
+            stageSkip("bc1-sampled-readback", "GL_EXT_texture_compression_s3tc absent");
+        } else {
+            auto compressedTexImage = (PFN_glCompressedTexImage2D)ext("glCompressedTexImage2D");
+            if (!compressedTexImage) return stageFailure("bc1-sampled-readback", 21, "glCompressedTexImage2D-missing");
+            // color0 = 0xF800 (red) > color1 = 0x001F (blue) selects the 4-colour
+            // mode; row r holds selector r: c0, c1, (2*c0+c1)/3, (c0+2*c1)/3.
+            static const unsigned char block[8] = {0x00,0xF8, 0x1F,0x00, 0x00,0x55,0xAA,0xFF};
+            static const int want[4][3] = {{255,0,0}, {0,0,255}, {170,0,85}, {85,0,170}};
+            uint32_t bc1 = 0; genTextures(1, &bc1); bindTexture(GL_TEXTURE_2D, bc1);
+            for (int i = 0; i < 16 && getError(); ++i) {}   // drop errors left by earlier stages
+            compressedTexImage(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 4, 4, 0, 8, block);
+            uint32_t uploadError = getError();
+            if (uploadError) {
+                char line[160]; char* p = append(line, "PLAY-OPENGL STAGE bc1-sampled-readback upload glGetError=");
+                p = appendInt(p, (int32_t)uploadError); p = append(p, "\n"); *p = 0; emit(line);
+                return stageFailure("bc1-sampled-readback", 21, "compressed-upload-error");
+            }
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glViewport(0, 0, 4, 4);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
+            drawTextured(bc1, (uintptr_t)triangle);
+            unsigned char px[64]; memset(px, 0, sizeof px);
+            glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            // Decoders round the 2/3 and 1/3 entries differently (before or after
+            // the 565 expansion), so allow a few counts; the palette entries are
+            // at least 85 apart, so a wrong selector or row order still fails.
+            bool match = true;
+            for (int row = 0; row < 4; ++row)
+                for (int col = 0; col < 4; ++col) {
+                    const unsigned char* q = px + row * 16 + col * 4;
+                    for (int c = 0; c < 3; ++c) {
+                        int d = (int)q[c] - want[row][c];
+                        if (d < -6 || d > 6) match = false;
+                    }
+                    if (q[3] != 255) match = false;
+                }
+            {char line[256]; char* p = append(line, "PLAY-OPENGL STAGE bc1-sampled-readback got=");
+             for (int row = 0; row < 4; ++row) {
+                 if (row) *p++ = '/';
+                 p = appendInt(p, px[row * 16]); *p++ = ','; p = appendInt(p, px[row * 16 + 1]); *p++ = ',';
+                 p = appendInt(p, px[row * 16 + 2]);
+             }
+             p = append(p, " want=255,0,0/0,0,255/170,0,85/85,0,170\n"); *p = 0; emit(line);}
+            if (!match) return stageFailure("bc1-sampled-readback", 21, "compressed-texture-sample-mismatch");
+            stagePass("bc1-sampled-readback", "format=BC1 internal=0x83F0 rows=4");
+            deleteTextures(1, &bc1);
+        }
+    }
+
     auto createAttribs41 = (PFN_wglCreateContextAttribsARB)(uintptr_t)
         wglGetProcAddress("wglCreateContextAttribsARB");
     if (!createAttribs41) return stageFailure("core41-draw", 23, "wine-unavailable:missing-create-context-attribs");
     int attrs41[] = {0x2091, 4, 0x2092, 1, 0x9126, 1, 0};
     HANDLE_GL core41 = createAttribs41(dc, nullptr, attrs41);
     if (!core41) return stageFailure("core41-draw", 23, "wine-unavailable:request-4.1-core-failed");
-    HANDLE_GL shared = wglCreateContext(dc);
-    auto shareLists = (PFN_wglShareLists)(uintptr_t)GetProcAddress(gl, "wglShareLists");
-    if (!shared || !shareLists || !shareLists(core41, shared))
-        return stageFailure("share-lists-draw", 20, "context-share-failed");
-    if (!wglMakeCurrent(dc, core41)) return stageFailure("share-lists-draw", 20, "make-core41-current-failed");
+    if (!wglMakeCurrent(dc, core41)) return stageFailure("core41-draw", 23, "make-current-failed");
     const char* version41 = glGetString(GL_VERSION);
     if (!version41 || version41[0] < '4' || (version41[0] == '4' && version41[2] < '1'))
         return stageFailure("core41-draw", 23, "requested-4.1-core-version-not-reported");
@@ -764,7 +922,6 @@ int opengl_entry() {
     auto genTextures = (PFN_glGenTextures)(uintptr_t)GetProcAddress(gl, "glGenTextures");
     auto bindTexture = (PFN_glBindTexture)(uintptr_t)GetProcAddress(gl, "glBindTexture");
     auto texImage = (PFN_glTexImage2D)(uintptr_t)GetProcAddress(gl, "glTexImage2D");
-    auto compressedTexImage = (PFN_glCompressedTexImage2D)lookup("glCompressedTexImage2D");
     auto texParameteri = (PFN_glTexParameteri)(uintptr_t)GetProcAddress(gl, "glTexParameteri");
     auto genFbos = (PFN_glGenFramebuffers)lookup("glGenFramebuffers");
     auto bindFbo = (PFN_glBindFramebuffer)lookup("glBindFramebuffer");
@@ -779,23 +936,21 @@ int opengl_entry() {
         !enableAttrib || !createShader || !shaderSource || !compileShader || !getShaderiv ||
         !createProgram || !attachShader || !linkProgram || !getProgramiv || !deleteShader ||
         !useProgram || !getUniform || !uniform1i || !drawArrays || !genTextures || !bindTexture ||
-        !texImage || !compressedTexImage || !texParameteri || !genFbos || !bindFbo || !checkFbo ||
+        !texImage || !texParameteri || !genFbos || !bindFbo || !checkFbo ||
         !genRbos || !bindRbo || !msaaStorage || !attachRbo || !blitFbo || !deleteRbos)
         return stageFailure("core41-draw", 23, "required-core-entry-point-missing");
 
-    // wglShareLists is called before either context creates objects. The buffer
-    // and texture are then created in the first context and consumed by a draw
-    // in the second; the VAO remains local to that second context.
-    float sharedVerts[] = {-1.0f,-1.0f, 3.0f,-1.0f, -1.0f,3.0f};
-    uint32_t sharedVbo = 0, sharedTex = 0;
-    genBuffers(1, &sharedVbo); bindBuffer(GL_ARRAY_BUFFER, sharedVbo);
-    bufferData(GL_ARRAY_BUFFER, (intptr_t)sizeof sharedVerts, sharedVerts, GL_STATIC_DRAW);
-    genTextures(1, &sharedTex); bindTexture(GL_TEXTURE_2D, sharedTex);
-    unsigned char sharedPixel[4] = {64,128,192,255};
-    texImage(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, sharedPixel);
+    // The buffer and texture the 4.1 core draw samples (wglShareLists and BC1
+    // have their own stages above).
+    float coreVerts[] = {-1.0f,-1.0f, 3.0f,-1.0f, -1.0f,3.0f};
+    uint32_t coreVbo = 0, coreTex = 0;
+    genBuffers(1, &coreVbo); bindBuffer(GL_ARRAY_BUFFER, coreVbo);
+    bufferData(GL_ARRAY_BUFFER, (intptr_t)sizeof coreVerts, coreVerts, GL_STATIC_DRAW);
+    genTextures(1, &coreTex); bindTexture(GL_TEXTURE_2D, coreTex);
+    unsigned char coreTexel[4] = {64,128,192,255};
+    texImage(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, coreTexel);
     texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    if (!wglMakeCurrent(dc, shared)) return stageFailure("share-lists-draw", 20, "make-shared-current-failed");
-    const char* sharedVs = "#version 410 core\nlayout(location=0) in vec2 pos; out vec2 uv; void main(){uv=pos*0.5+0.5; gl_Position=vec4(pos,0,1);}";
+    const char* coreVs = "#version 410 core\nlayout(location=0) in vec2 pos; out vec2 uv; void main(){uv=pos*0.5+0.5; gl_Position=vec4(pos,0,1);}";
     const char* sampleFs = "#version 410 core\nin vec2 uv; uniform sampler2D image; out vec4 frag; void main(){frag=texture(image,uv);} ";
     auto makeProgram = [&](const char* vsText, const char* fsText) -> uint32_t {
         uint32_t vs = createShader(GL_VERTEX_SHADER), fs = createShader(GL_FRAGMENT_SHADER);
@@ -816,23 +971,7 @@ int opengl_entry() {
         glReadPixels(160, 120, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
         return true;
     };
-    uint32_t sampleProgram = makeProgram(sharedVs, sampleFs);
-    unsigned char sharedGot[4] = {0,0,0,0};
-    if (!sampleProgram || !drawSample(sampleProgram, sharedVbo, sharedTex, sharedGot) ||
-        sharedGot[0] != 64 || sharedGot[1] != 128 || sharedGot[2] != 192 || sharedGot[3] != 255)
-        return stageFailure("share-lists-draw", 20, "shared-buffer-texture-readback-mismatch");
-    stagePass("share-lists-draw", "shared-buffer-and-texture readback=64,128,192,255");
-
-    // BC1/DXT1 block: solid red (RGB565 endpoint 0xf800, all selectors 0).
-    if (!hasS3tc) return stageFailure("bc1-sampled-readback", 21, "wine-unavailable:S3TC-extension-absent");
-    uint32_t bc1 = 0; genTextures(1, &bc1); bindTexture(GL_TEXTURE_2D, bc1);
-    const unsigned char redBc1[8] = {0x00,0xf8,0x00,0x00,0,0,0,0};
-    compressedTexImage(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, 4, 4, 0, 8, redBc1);
-    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    unsigned char bc1Got[4] = {0,0,0,0};
-    if (!drawSample(sampleProgram, sharedVbo, bc1, bc1Got) || bc1Got[0] < 250 || bc1Got[1] > 2 || bc1Got[2] > 2 || bc1Got[3] != 255)
-        return stageFailure("bc1-sampled-readback", 21, "compressed-texture-sample-mismatch");
-    stagePass("bc1-sampled-readback", "format=BC1 got=255,0,0,255");
+    uint32_t sampleProgram = makeProgram(coreVs, sampleFs);
 
     // Resize the guest window before a fresh default framebuffer clear/readback.
     if (!SetWindowPos(window, nullptr, 0, 0, 400, 300, SWP_NOZORDER | SWP_NOACTIVATE))
@@ -852,7 +991,7 @@ int opengl_entry() {
     // sampled readback rather than treating context creation alone as coverage.
     if (!wglMakeCurrent(dc, core41)) return stageFailure("core41-draw", 23, "make-current-failed");
     unsigned char core41Got[4] = {0,0,0,0};
-    if (!drawSample(sampleProgram, sharedVbo, sharedTex, core41Got) ||
+    if (!sampleProgram || !drawSample(sampleProgram, coreVbo, coreTex, core41Got) ||
         core41Got[0] != 64 || core41Got[1] != 128 || core41Got[2] != 192 || core41Got[3] != 255)
         return stageFailure("core41-draw", 23, "4.1-core-draw-readback-mismatch");
     {char line[192]; char* p = append(line, "PLAY-OPENGL STAGE core41-draw exit=0 requested=4.1 version=\"");
@@ -886,7 +1025,7 @@ int opengl_entry() {
         return stageFailure("msaa-resolve-readback", 24, "resolved-pixel-mismatch");
     stagePass("msaa-resolve-readback", "samples=4 got=64,128,191,255");
     wglMakeCurrent(nullptr, nullptr);
-    wglDeleteContext(shared); wglDeleteContext(core41);
+    wglDeleteContext(core41);
     if (!wglMakeCurrent(dc, context)) return fail(18, "restore compat context", GetLastError());
 
     wglMakeCurrent(nullptr, nullptr);

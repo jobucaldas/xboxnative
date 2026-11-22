@@ -23,6 +23,8 @@ a non-null context fail with `ERROR_INVALID_HANDLE`. With no previous context,
 case does not validate the DC, create a context, or change either current query.
 Tests compare all these cases through resolved pointers with host Wine on two
 threads, using null and arbitrary handle values. Host handles never reach GDI.
+`wglShareLists` follows the same rule: with no guest context handles every pair fails with
+`ERROR_INVALID_HANDLE`, as Wine's does, so a guest that resolves it gets an answer instead of a missing export.
 
 ## Loading `OPENGL32.DLL`
 
