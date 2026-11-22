@@ -1535,7 +1535,7 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             else if(q.name=="ClipCursor"){using Fn=BOOL(WINAPI*)(const RECT*);RECT r{};if(q.input.size()==sizeof(r))memcpy(&r,q.input.data(),sizeof(r));if(p)result(reinterpret_cast<Fn>(p)(q.input.empty()?nullptr:&r));}
             else if(q.name=="GetClipCursor"){using Fn=BOOL(WINAPI*)(RECT*);RECT r{};if(p){BOOL ok=reinterpret_cast<Fn>(p)(&r);bytes(&r,sizeof(r));q.result=ok;q.supported=true;}}
             else if(q.name=="GetCursorPos"){using Fn=BOOL(WINAPI*)(POINT*);POINT v{};if(p){BOOL ok=reinterpret_cast<Fn>(p)(&v);bytes(&v,sizeof(v));q.result=ok;q.supported=true;}}
-            else if(q.name=="IsWindowVisible"||q.name=="IsIconic"||q.name=="SetForegroundWindow"){using Fn=BOOL(WINAPI*)(HWND);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0]));}
+            else if(q.name=="IsWindowVisible"||q.name=="IsIconic"||q.name=="SetForegroundWindow"||q.name=="IsWindow"||q.name=="IsWindowEnabled"){using Fn=BOOL(WINAPI*)(HWND);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0]));}
             else if(q.name=="GetParent"){using Fn=HWND(WINAPI*)(HWND);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0]));}
             else if(q.name=="AllowSetForegroundWindow"){using Fn=BOOL(WINAPI*)(DWORD);if(p)result(reinterpret_cast<Fn>(p)(DWORD(q.args[0])));}
             else if(q.name=="GetForegroundWindow"||q.name=="GetFocus"||q.name=="GetActiveWindow"){using Fn=HWND(WINAPI*)();if(p)result(reinterpret_cast<Fn>(p)());}
@@ -1545,6 +1545,55 @@ static void lp_run_pe32(LpCtx& c,const std::wstring& path,const std::wstring& ex
             else if(q.name=="PeekMessageA"||q.name=="PeekMessageW"||q.name=="GetMessageA"||q.name=="GetMessageW"){MSG m{};BOOL ok=FALSE;if(q.name.find("Peek")==0){using Fn=BOOL(WINAPI*)(MSG*,HWND,UINT,UINT,UINT);if(p)ok=reinterpret_cast<Fn>(p)(&m,(HWND)q.args[1],UINT(q.args[2]),UINT(q.args[3]),UINT(q.args[4]));}else{using Fn=BOOL(WINAPI*)(MSG*,HWND,UINT,UINT);if(p)ok=reinterpret_cast<Fn>(p)(&m,(HWND)q.args[1],UINT(q.args[2]),UINT(q.args[3]));}if(p){struct GuestMsg{uintptr_t hwnd;uint32_t message,wp,lp,time;int32_t x,y;} gm{uintptr_t(m.hwnd),m.message,uint32_t(m.wParam),uint32_t(m.lParam),m.time,m.pt.x,m.pt.y};bytes(&gm,sizeof(gm));q.result=ok;q.supported=true;}}
             else if(q.name=="TranslateMessage"){using Fn=BOOL(WINAPI*)(const MSG*);MSG m{};if(p){m.hwnd=(HWND)q.args[0];m.message=UINT(q.args[1]);m.wParam=WPARAM(q.args[2]);m.lParam=LPARAM(q.args[3]);result(reinterpret_cast<Fn>(p)(&m));}}
             else if(q.name=="DefWindowProcA"||q.name=="DefWindowProcW"){using Fn=LRESULT(WINAPI*)(HWND,UINT,WPARAM,LPARAM);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],UINT(q.args[1]),WPARAM(q.args[2]),LPARAM(q.args[3])));}
+            else if(q.name=="EnableWindow"){using Fn=BOOL(WINAPI*)(HWND,BOOL);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],BOOL(q.args[1])));}
+            else if(q.name=="GetDesktopWindow"){using Fn=HWND(WINAPI*)();if(p)result(reinterpret_cast<Fn>(p)());}
+            else if(q.name=="GetWindowThreadProcessId"){using Fn=DWORD(WINAPI*)(HWND,LPDWORD);DWORD process=0;if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0],&process));}
+            else if(q.name=="GetWindowTextLengthW"){using Fn=int(WINAPI*)(HWND);if(p)result(reinterpret_cast<Fn>(p)((HWND)q.args[0]));}
+            else if(q.name=="GetWindowTextLengthA"){
+                // u32c exports only the Unicode length: measure the title as GetWindowTextA would return it (ANSI code page bytes).
+                using Len=int(WINAPI*)(HWND);using Get=int(WINAPI*)(HWND,LPWSTR,int);
+                auto length=records?GetProcAddress(records,"GetWindowTextLengthW"):nullptr;auto text=records?GetProcAddress(records,"GetWindowTextW"):nullptr;
+                if(length&&text){
+                    const int chars=reinterpret_cast<Len>(length)((HWND)q.args[0]);std::wstring title(size_t(chars>0?chars:0)+1,L'\0');
+                    const int got=chars>0?reinterpret_cast<Get>(text)((HWND)q.args[0],title.data(),int(title.size())):0;
+                    const int ansi=got>0?WideCharToMultiByte(CP_ACP,0,title.c_str(),got,nullptr,0,nullptr,nullptr):0;
+                    result(ansi>0?ansi:0);
+                }
+            }
+            else if(q.name=="GetWindowTextW"||q.name=="GetWindowTextA"){
+                // q.output is the caller's buffer: the record call fills it in place and the guest copies result+1 units back.
+                const bool wide=q.name.back()=='W';const size_t units=q.output.size()/(wide?2:1);
+                if(p&&units){
+                    if(wide){using Fn=int(WINAPI*)(HWND,LPWSTR,int);result(reinterpret_cast<Fn>(p)((HWND)q.args[0],reinterpret_cast<LPWSTR>(q.output.data()),int(units)));}
+                    else{using Fn=int(WINAPI*)(HWND,LPSTR,int);result(reinterpret_cast<Fn>(p)((HWND)q.args[0],reinterpret_cast<LPSTR>(q.output.data()),int(units)));}
+                }
+            }
+            else if(q.name=="MapWindowPoints"){
+                using Fn=int(WINAPI*)(HWND,HWND,POINT*,UINT);std::vector<POINT> points(q.input.size()/sizeof(POINT));
+                if(!points.empty())memcpy(points.data(),q.input.data(),points.size()*sizeof(POINT));
+                if(p){
+                    const int mapped=reinterpret_cast<Fn>(p)((HWND)q.args[0],(HWND)q.args[1],points.empty()?nullptr:points.data(),points.empty()?UINT(q.args[3]):UINT(points.size()));
+                    if(!points.empty())bytes(points.data(),points.size()*sizeof(POINT));
+                    q.result=uintptr_t(mapped);q.supported=true;
+                }
+            }
+            else if(q.name=="GetKeyState"||q.name=="GetAsyncKeyState"){using Fn=SHORT(WINAPI*)(int);if(p)result(reinterpret_cast<Fn>(p)(int(q.args[0])));}
+            else if(q.name=="GetKeyboardState"){using Fn=BOOL(WINAPI*)(PBYTE);if(p&&q.output.size()==256){const BOOL ok=reinterpret_cast<Fn>(p)(q.output.data());q.result=ok;q.supported=true;}}
+            else if(q.name=="MapVirtualKeyA"||q.name=="MapVirtualKeyW"){using Fn=UINT(WINAPI*)(UINT,UINT);if(p)result(reinterpret_cast<Fn>(p)(UINT(q.args[0]),UINT(q.args[1])));}
+            else if(q.name=="GetKeyNameTextW"||q.name=="GetKeyNameTextA"){
+                // u32c exports only the Unicode key name: the ANSI form converts it to the ANSI code page and truncates to the buffer.
+                using Fn=int(WINAPI*)(LONG,LPWSTR,int);auto name=records?GetProcAddress(records,"GetKeyNameTextW"):nullptr;
+                const bool wide=q.name.back()=='W';const size_t units=q.output.size()/(wide?2:1);
+                if(name&&units){
+                    std::wstring key(units,L'\0');int n=reinterpret_cast<Fn>(name)(LONG(q.args[0]),key.data(),int(units));if(n<0)n=0;
+                    if(wide){memcpy(q.output.data(),key.data(),size_t(n)*2);result(n);}
+                    else{
+                        const int need=n?WideCharToMultiByte(CP_ACP,0,key.c_str(),n,nullptr,0,nullptr,nullptr):0;std::string text(size_t(need>0?need:0),'\0');
+                        if(need>0)WideCharToMultiByte(CP_ACP,0,key.c_str(),n,text.data(),need,nullptr,nullptr);
+                        const size_t kept=std::min(text.size(),units-1);memcpy(q.output.data(),text.data(),kept);result(kept);
+                    }
+                }
+            }
         };
         auto proc=[](const char* name)->uintptr_t {
             x86_mesa_map();

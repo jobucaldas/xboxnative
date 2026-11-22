@@ -256,7 +256,7 @@ struct Guest {
     std::map<uint32_t, GdiDc> gdi_dcs;
     uint32_t gdi_serial=0;
     uint32_t file_serial = 0, find_serial = 0, sync_serial = 0, sync_handle_serial = 0;
-    static constexpr uint32_t process_id = 0x1000;     // GetCurrentProcessId; OpenProcess accepts only this id
+    static constexpr uint32_t process_id = Host::process_id;     // GetCurrentProcessId; OpenProcess accepts only this id
     std::set<uint32_t> process_handles; uint32_t process_handle_serial = 0;  // OpenProcess results, closable via CloseHandle
     std::map<uint32_t, bool> mm_timers;
     uint32_t mm_timer_serial = 0;
@@ -1595,10 +1595,6 @@ inline void Guest::register_all() {
         return 0xc000u+(hash&0x3fffu);
     });
     reg.add("kernel32.dll", "SetThreadExecutionState", Conv::Stdcall, 1, [](Cpu& c) -> uint32_t { return c.arg(0); });
-    reg.add("user32.dll", "GetKeyboardState", Conv::Stdcall, 1, [this](Cpu& c) -> uint32_t {
-        if (!c.arg(0)) { set_last_error(87); return 0; }
-        std::vector<uint8_t> state(256,0); c.mem.write_bytes(c.arg(0),state.data(),uint32_t(state.size())); return 1;
-    });
     reg.add("user32.dll", "ToUnicode", Conv::Stdcall, 6, [](Cpu&) -> uint32_t { return 0; });
     reg.add("kernel32.dll", "VerSetConditionMask", Conv::Stdcall, 4, [](Cpu& c) -> uint32_t {
         uint64_t mask=uint64_t(c.arg(0))|(uint64_t(c.arg(1))<<32); uint32_t types=c.arg(2); uint8_t condition=uint8_t(c.arg(3))&7;

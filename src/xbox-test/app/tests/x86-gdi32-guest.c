@@ -116,7 +116,9 @@ void WINAPI entry(void) {
     if (LoadStringW(NULL,1,(LPWSTR)&rect,sizeof(rect))) fail(203);
     if (MapWindowPoints(window,NULL,&point,1)) fail(21);  /* MonitorFrom* are real display routes (#319) */
     /* Real waits since #330: no handles and a zero timeout times out, as on Windows. */
-    if (MsgWaitForMultipleObjectsEx(0,NULL,0,0,0) != WAIT_TIMEOUT || OffsetRect(&rect,0,0)) fail(22);
+    RECT moved = {1,2,11,12};  /* OffsetRect is a real route now: it shifts the rectangle and returns TRUE */
+    if (MsgWaitForMultipleObjectsEx(0,NULL,0,0,0) != WAIT_TIMEOUT || !OffsetRect(&moved,3,-2) ||
+        moved.left!=4 || moved.top!=0 || moved.right!=14 || moved.bottom!=10) fail(22);
     PostQuitMessage(0);
     if (GetLastError() != ERROR_CALL_NOT_IMPLEMENTED) fail(15);
     if (MessageBoxA(window,"route test","title",MB_OK) != IDOK ||
