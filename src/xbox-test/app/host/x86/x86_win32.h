@@ -195,6 +195,7 @@ struct Host {
     std::function<void(XInputCall&)> xinput_call;
     std::function<void(const std::string&)> route_trace;
     std::map<uint32_t, uintptr_t> window_handles, dc_handles, gl_contexts, user_handles;
+    std::map<uint32_t, uint32_t> window_threads;  // guest window token -> guest thread id that created it
     std::map<std::u16string, uint32_t> window_class_procs;
     std::map<uint32_t, uint32_t> window_procs;
     std::map<uint32_t, std::map<int32_t, uint32_t>> window_longs;
@@ -214,6 +215,14 @@ struct Host {
     std::vector<Timer> timers;
     uint32_t next_timer_id = 1;
     uint32_t window_class_serial = 0xC000u, gl_handle_serial = 0xE0000000u, window_handle_serial = 0xD0000000u, user_handle_serial = 0xC0000000u, gl_map_next = 0x70000000u;
+    static constexpr uint32_t process_id = 0x1000;     // GetCurrentProcessId; OpenProcess accepts only this id
+    // Hands the guest a stable token for a native window and remembers the guest thread that owns it.
+    uint32_t map_native_window(uintptr_t native, uint32_t thread) {
+        if (!native) return 0;
+        if (++window_handle_serial < 0xD0000000u) window_handle_serial = 0xD0000000u;
+        window_handles[window_handle_serial] = native; window_threads[window_handle_serial] = thread;
+        return window_handle_serial;
+    }
     uint32_t gl_string_cursor = 0, gl_string_end = 0, gl_string_next = 0x76000000u;
     uint32_t vertex_array = 0;
     std::function<uintptr_t(bool, uint32_t, uintptr_t*)> d3d9_factory;
@@ -326,11 +335,14 @@ inline void register_win32(Registry& r, Host& h) {
         for (size_t i = 0; i < sizeof(description) / sizeof(description[0]); ++i) c.mem.w(out + 68 + uint32_t(i * 2), description[i], 2);
         c.mem.w32(out + 324, 1); return 1;
     });
-    r.add("user32.dll", "GetMonitorInfoW", Conv::Stdcall, 2, [&h, count](Cpu& c) -> uint32_t {
-        count("GetMonitorInfoW");
+    // MONITORINFO is 40 bytes; MONITORINFOEXA adds CHAR[32] (72) and MONITORINFOEXW WCHAR[32] (104).
+    auto monitor_info = [&h, count](Cpu& c, bool wide) -> uint32_t {
+        count(wide ? "GetMonitorInfoW" : "GetMonitorInfoA");
         uint32_t monitor = c.arg(0), info = c.arg(1);
-        if (monitor != 0xCE000001u || !info || c.mem.r32(info) < 40) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
+        if (!info) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
         uint32_t info_size = c.mem.r32(info);
+        if (info_size != 40 && info_size != (wide ? 104u : 72u)) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
+        if (monitor != 0xCE000001u) { c.mem.w32(c.fs_base + 0x34, 1461); return 0; }  // ERROR_INVALID_MONITOR_HANDLE
         int width = 1280, height = 720;
         if (h.system_metrics) { h.system_metrics(0, width); h.system_metrics(1, height); }
 #if defined(_WIN32)
@@ -346,20 +358,23 @@ inline void register_win32(Registry& r, Host& h) {
         c.mem.w32(info + 20, 0); c.mem.w32(info + 24, 0);
         c.mem.w32(info + 28, uint32_t(width)); c.mem.w32(info + 32, uint32_t(height));
         c.mem.w32(info + 36, 1);
-        if (info_size >= 104) {
+        if (info_size > 40) {
             const char16_t name[] = u"\\\\.\\DISPLAY1";
-            for (size_t i = 0; i < sizeof(name) / sizeof(name[0]); ++i) c.mem.w(info + 40 + uint32_t(i * 2), name[i], 2);
+            for (size_t i = 0; i < sizeof(name) / sizeof(name[0]); ++i) c.mem.w(info + 40 + uint32_t(i * (wide ? 2 : 1)), name[i], wide ? 2 : 1);
         }
         return 1;
-    });
+    };
+    r.add("user32.dll", "GetMonitorInfoW", Conv::Stdcall, 2, [monitor_info](Cpu& c) -> uint32_t { return monitor_info(c, true); });
+    r.add("user32.dll", "GetMonitorInfoA", Conv::Stdcall, 2, [monitor_info](Cpu& c) -> uint32_t { return monitor_info(c, false); });
     r.add("user32.dll", "MonitorFromWindow", Conv::Stdcall, 2, [count](Cpu&) -> uint32_t {
         count("MonitorFromWindow"); return 0xCE000001u;
     });
     r.add("user32.dll", "MonitorFromPoint", Conv::Stdcall, 3, [count](Cpu&) -> uint32_t {
         count("MonitorFromPoint"); return 0xCE000001u;
     });
-    r.add("user32.dll", "MonitorFromRect", Conv::Stdcall, 2, [count](Cpu&) -> uint32_t {
-        count("MonitorFromRect"); return 0xCE000001u;
+    r.add("user32.dll", "MonitorFromRect", Conv::Stdcall, 2, [count](Cpu& c) -> uint32_t {
+        count("MonitorFromRect"); if (!c.arg(0)) return 0;  // a NULL RECT names no monitor
+        return 0xCE000001u;
     });
     r.add("user32.dll", "MapVirtualKeyW", Conv::Stdcall, 2, [count](Cpu& c) -> uint32_t {
         count("MapVirtualKeyW"); uint32_t code = c.arg(0), type = c.arg(1);
@@ -662,25 +677,122 @@ inline void register_win32(Registry& r, Host& h) {
     r.add("user32.dll", "SetTimer", Conv::Stdcall, 4, [count, set_timer](Cpu& c) -> uint32_t { count("SetTimer"); return set_timer(c); });
     r.add("user32.dll", "SetCoalescableTimer", Conv::Stdcall, 5, [count, set_timer](Cpu& c) -> uint32_t { count("SetCoalescableTimer"); return set_timer(c); });
     r.add("user32.dll", "KillTimer", Conv::Stdcall, 2, [count, kill_timer](Cpu& c) -> uint32_t { count("KillTimer"); return kill_timer(c); });
+    // Window state, text, coordinate and keyboard routes served by the host's user32 records. A guest
+    // window token resolves to its native HWND before the record call; no native handle reaches the guest.
+    static constexpr uint32_t window_text_chars = 32768;  // one text read never allocates more than this
+    static constexpr uint32_t map_points_max = 0x10000;   // MapWindowPoints marshals at most this many POINTs
+    auto guest_thread = [](Cpu& c) { return c.mem.r32(c.fs_base + 0x24); };
+    auto invalid_window = [](Cpu& c) -> uint32_t { c.mem.w32(c.fs_base + 0x34, 1400); return 0; };  // ERROR_INVALID_WINDOW_HANDLE
+    // A text result of N characters writes N units plus the terminator; the host buffer never exceeds `capacity`.
+    auto write_text = [](Cpu& c, uint32_t out, const Host::WindowCall& q, uint32_t capacity, unsigned unit) -> uint32_t {
+        const int32_t result = int32_t(q.result);
+        const uint32_t length = result > 0 ? std::min(uint32_t(result), capacity - 1) : 0;
+        std::vector<uint8_t> text((size_t(length) + 1) * unit, 0);
+        memcpy(text.data(), q.output.data(), std::min(size_t(length) * unit, q.output.size()));
+        c.mem.write_bytes(out, text.data(), uint32_t(text.size())); return length;
+    };
+    r.add("user32.dll", "OffsetRect", Conv::Stdcall, 3, [count](Cpu& c) -> uint32_t {
+        count("OffsetRect"); const uint32_t rect = c.arg(0); if (!rect) return 0;
+        const uint32_t dx = c.arg(1), dy = c.arg(2);  // unsigned adds wrap exactly as the 32-bit result does
+        const uint32_t edges[4] = {c.mem.r32(rect) + dx, c.mem.r32(rect + 4) + dy, c.mem.r32(rect + 8) + dx, c.mem.r32(rect + 12) + dy};
+        for (uint32_t i = 0; i < 4; ++i) c.mem.w32(rect + i * 4, edges[i]);
+        return 1;
+    });
+    for (const char* name : {"IsWindow", "IsWindowEnabled"})
+        r.add("user32.dll", name, Conv::Stdcall, 1, [count, native_window, call_window, name](Cpu& c) -> uint32_t {
+            count(name); const uintptr_t hwnd = native_window(c.arg(0));
+            if (!hwnd) return 0;  // NULL or unknown: not a window, and not an error
+            auto q = call_window(c, name, {hwnd}); return q.supported && q.result ? 1u : 0u;
+        });
+    r.add("user32.dll", "EnableWindow", Conv::Stdcall, 2, [count, native_window, call_window, invalid_window](Cpu& c) -> uint32_t {
+        count("EnableWindow"); const uintptr_t hwnd = native_window(c.arg(0));
+        if (!hwnd) return invalid_window(c);
+        auto q = call_window(c, "EnableWindow", {hwnd, c.arg(1) ? 1u : 0u}); return q.supported && q.result ? 1u : 0u;
+    });
+    r.add("user32.dll", "GetDesktopWindow", Conv::Stdcall, 0, [&h, count, guest_window, call_window, guest_thread](Cpu& c) -> uint32_t {
+        count("GetDesktopWindow"); auto q = call_window(c, "GetDesktopWindow", {});
+        if (!q.supported || !q.result) return 0;
+        const uint32_t token = guest_window(q.result); return token ? token : h.map_native_window(q.result, guest_thread(c));
+    });
+    for (const char* name : {"GetWindowTextW", "GetWindowTextA"})
+        r.add("user32.dll", name, Conv::Stdcall, 3, [count, native_window, call_window, invalid_window, write_text, name](Cpu& c) -> uint32_t {
+            count(name); const uint32_t out = c.arg(1); const int32_t max = int32_t(c.arg(2));
+            if (!out || max <= 0) return 0;
+            const uintptr_t hwnd = native_window(c.arg(0)); if (!hwnd) return invalid_window(c);
+            const unsigned unit = name[strlen(name) - 1] == 'W' ? 2 : 1; const uint32_t chars = std::min(uint32_t(max), window_text_chars);
+            auto q = call_window(c, name, {hwnd, 0, chars}, {}, size_t(chars) * unit);
+            return q.supported ? write_text(c, out, q, chars, unit) : 0;
+        });
+    for (const char* name : {"GetWindowTextLengthW", "GetWindowTextLengthA"})
+        r.add("user32.dll", name, Conv::Stdcall, 1, [count, native_window, call_window, invalid_window, name](Cpu& c) -> uint32_t {
+            count(name); const uintptr_t hwnd = native_window(c.arg(0)); if (!hwnd) return invalid_window(c);
+            auto q = call_window(c, name, {hwnd}); return q.supported ? uint32_t(int32_t(q.result)) : 0;
+        });
+    // The guest owns one process id and a thread id per guest thread: a window reports the guest thread that
+    // created it (the caller's thread for a window the host made, such as the desktop), never a native id.
+    r.add("user32.dll", "GetWindowThreadProcessId", Conv::Stdcall, 2, [&h, count, native_window, call_window, invalid_window, guest_thread](Cpu& c) -> uint32_t {
+        count("GetWindowThreadProcessId"); const uint32_t token = c.arg(0), process = c.arg(1);
+        const uintptr_t hwnd = native_window(token); if (!hwnd) return invalid_window(c);
+        auto q = call_window(c, "GetWindowThreadProcessId", {hwnd});
+        if (!q.supported) return 0;
+        if (!q.result) return invalid_window(c);  // the host no longer knows the window: leave *process alone
+        if (process) c.mem.w32(process, Host::process_id);
+        auto thread = h.window_threads.find(token); return thread == h.window_threads.end() ? guest_thread(c) : thread->second;
+    });
+    r.add("user32.dll", "MapWindowPoints", Conv::Stdcall, 4, [count, native_window, call_window, invalid_window](Cpu& c) -> uint32_t {
+        count("MapWindowPoints"); const uint32_t from = c.arg(0), to = c.arg(1), points = c.arg(2), n = c.arg(3);
+        const uintptr_t native_from = native_window(from), native_to = native_window(to);  // HWND_DESKTOP (0) stays 0
+        if ((from && !native_from) || (to && !native_to)) return invalid_window(c);
+        if (points && n > map_points_max) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }  // also keeps n * 8 from overflowing
+        std::vector<uint8_t> bytes; if (points) bytes = c.mem.read_bytes(points, n * 8);
+        auto q = call_window(c, "MapWindowPoints", {native_from, native_to, 0, n}, bytes, bytes.size());
+        if (!q.supported) return 0;
+        if (!bytes.empty() && q.output.size() == bytes.size()) c.mem.write_bytes(points, q.output.data(), uint32_t(bytes.size()));
+        return uint32_t(q.result);
+    });
+    // The keyboard routes below answer from the host's input records when it has them. GetKeyState,
+    // GetKeyboardState and MapVirtualKey keep their earlier neutral/table answers when it does not.
+    auto try_window = [&h](const char* name, std::initializer_list<uintptr_t> args, size_t output_size = 0) {
+        Host::WindowCall q{}; q.name = name; size_t i = 0; for (auto a : args) q.args[i++] = a;
+        q.output.resize(output_size); if (h.window_call) h.window_call(q);
+        return q;
+    };
+    auto neutral_key_state = r.map.at({"user32.dll", "getkeystate"}).fn;
+    r.add("user32.dll", "GetKeyState", Conv::Stdcall, 1, [count, try_window, neutral_key_state](Cpu& c) -> uint32_t {
+        auto q = try_window("GetKeyState", {c.arg(0)}); if (!q.supported) return neutral_key_state(c);
+        count("GetKeyState"); return uint32_t(int32_t(int16_t(q.result)));
+    });
+    r.add("user32.dll", "GetAsyncKeyState", Conv::Stdcall, 1, [count, call_window](Cpu& c) -> uint32_t {
+        count("GetAsyncKeyState"); auto q = call_window(c, "GetAsyncKeyState", {c.arg(0)});
+        return q.supported ? uint32_t(int32_t(int16_t(q.result))) : 0;
+    });
+    r.add("user32.dll", "GetKeyboardState", Conv::Stdcall, 1, [count, try_window](Cpu& c) -> uint32_t {
+        count("GetKeyboardState"); const uint32_t out = c.arg(0);
+        if (!out) { c.mem.w32(c.fs_base + 0x34, 87); return 0; }
+        auto q = try_window("GetKeyboardState", {0}, 256);
+        std::vector<uint8_t> state(256, 0);  // without key records every key reads up
+        if (q.supported) { if (!q.result || q.output.size() != state.size()) return 0; state = q.output; }
+        c.mem.write_bytes(out, state.data(), uint32_t(state.size())); return 1;
+    });
+    auto table_map_virtual_key = r.map.at({"user32.dll", "mapvirtualkeyw"}).fn;
+    for (const char* name : {"MapVirtualKeyW", "MapVirtualKeyA"})  // virtual keys carry no text: A and W agree
+        r.add("user32.dll", name, Conv::Stdcall, 2, [count, try_window, table_map_virtual_key, name](Cpu& c) -> uint32_t {
+            auto q = try_window(name, {c.arg(0), c.arg(1)}); if (!q.supported) return table_map_virtual_key(c);
+            count(name); return uint32_t(q.result);
+        });
+    for (const char* name : {"GetKeyNameTextW", "GetKeyNameTextA"})
+        r.add("user32.dll", name, Conv::Stdcall, 3, [count, call_window, write_text, name](Cpu& c) -> uint32_t {
+            count(name); const uint32_t out = c.arg(1); const int32_t size = int32_t(c.arg(2));
+            if (!out || size <= 0) return 0;
+            const unsigned unit = name[strlen(name) - 1] == 'W' ? 2 : 1; const uint32_t chars = std::min(uint32_t(size), 256u);  // key names are short
+            auto q = call_window(c, name, {c.arg(0), 0, chars}, {}, size_t(chars) * unit);
+            return q.supported ? write_text(c, out, q, chars, unit) : 0;
+        });
     // Other frequent user32 imports in the ranked gap reports. These remain
     // explicit unsupported results until their input/output contracts can be
     // backed by the UWP record layer.
-    unavailable("GetWindowTextA", 3);
-    unavailable("GetWindowTextW", 3);
-    unavailable("GetWindowTextLengthA", 1);
-    unavailable("GetWindowTextLengthW", 1);
-    unavailable("GetKeyState", 1);
-    unavailable("GetAsyncKeyState", 1);
-    unavailable("GetKeyboardState", 1);
-    unavailable("GetKeyNameTextA", 3);
-    unavailable("GetKeyNameTextW", 3);
     unavailable("GetKeyboardType", 1);
-    unavailable("MapVirtualKeyA", 2);
-    unavailable("MapVirtualKeyW", 2);
-    unavailable("GetWindowThreadProcessId", 2);
-    unavailable("GetDesktopWindow", 0);
     unavailable("GetDlgItem", 2);
-    unavailable("IsWindow", 1);
     r.add("user32.dll", "AllowSetForegroundWindow", Conv::Stdcall, 1, [&h, count](Cpu& c) -> uint32_t {
         count("AllowSetForegroundWindow"); Host::WindowCall q{}; q.name="AllowSetForegroundWindow"; q.args[0]=c.arg(0);
         if (h.window_call) h.window_call(q);
@@ -690,8 +802,6 @@ inline void register_win32(Registry& r, Host& h) {
     unavailable("CallNextHookEx", 4);
     unavailable("DialogBoxParamW", 5, uint32_t(-1));
     unavailable("EndDialog", 2);
-    unavailable("GetMonitorInfoA", 2);
-    unavailable("GetMonitorInfoW", 2);
     r.add("user32.dll", "GetRawInputDeviceList", Conv::Stdcall, 3, [count](Cpu& c) -> uint32_t {
         count("GetRawInputDeviceList");
         if (!c.arg(1)) { c.mem.w32(c.fs_base + 0x34, 87); return uint32_t(-1); }
@@ -699,13 +809,8 @@ inline void register_win32(Registry& r, Host& h) {
         return 0;
     });
     unavailable("GetRawInputData", 5, uint32_t(-1));
-    unavailable("GetWindowLongPtrW", 2);
     unavailable("LoadStringW", 4);
-    unavailable("MapWindowPoints", 4);
-    unavailable("MonitorFromRect", 2);
-    unavailable("MonitorFromWindow", 2);
     unavailable("MsgWaitForMultipleObjectsEx", 5, uint32_t(-1));
-    unavailable("OffsetRect", 3);
     unavailable("BeginPaint", 2);
     unavailable("CheckDlgButton", 3);
     unavailable("CheckMenuItem", 3);
@@ -713,7 +818,6 @@ inline void register_win32(Registry& r, Host& h) {
     unavailable("CreateDialogParamA", 5);
     unavailable("DestroyMenu", 1);
     unavailable("DialogBoxParamA", 5, uint32_t(-1));
-    unavailable("EnableWindow", 2);
     unavailable("EndPaint", 2);
     unavailable("FindWindowA", 2);
     unavailable("GetDlgCtrlID", 1);
@@ -722,7 +826,6 @@ inline void register_win32(Registry& r, Host& h) {
     unavailable("GetMenuState", 3);
     unavailable("GetSubMenu", 2);
     unavailable("IsDlgButtonChecked", 2);
-    unavailable("IsWindowEnabled", 1);
     unavailable("LoadMenuA", 2);
     unavailable("PostThreadMessageA", 4);
     unavailable("SendDlgItemMessageA", 5);
@@ -917,12 +1020,7 @@ inline void register_gl(Registry& r, Host& h) {
     };
     dialog_route("CreateDialogParamA", 0);
     dialog_route("DialogBoxParamA", uint32_t(-1));
-    auto map_window = [&h](uintptr_t native) {
-        if (!native) return uint32_t(0);
-        if (++h.window_handle_serial < 0xD0000000u) h.window_handle_serial = 0xD0000000u;
-        h.window_handles[h.window_handle_serial] = native;
-        return h.window_handle_serial;
-    };
+    auto map_window = [&h](uintptr_t native, uint32_t thread) { return h.map_native_window(native, thread); };
     auto register_class = [&h](std::u16string name) -> uint32_t {
         if (!h.register_window_class || !h.register_window_class(name)) return 0;
         if (++h.window_class_serial > 0xffffu) h.window_class_serial = 0xc001u;
@@ -957,7 +1055,7 @@ inline void register_gl(Registry& r, Host& h) {
         q.style = c.arg(3); q.x = c.arg(4); q.y = c.arg(5); q.width = c.arg(6); q.height = c.arg(7);
         q.parent = c.arg(8) == 0xfffffffdu ? uintptr_t(int32_t(c.arg(8))) : c.arg(8) ? window(c.arg(8)) : 0; q.menu = c.arg(9); q.instance = c.arg(10);
         if ((c.arg(8) && c.arg(8) != 0xfffffffdu && !q.parent) || !q.class_name.size()) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
-        uint32_t token = map_window(h.create_window(q));
+        uint32_t token = map_window(h.create_window(q), c.mem.r32(c.fs_base + 0x24));
         if (token) { h.window_procs[token] = h.window_class_procs[q.class_name]; h.window_longs[token][-4] = h.window_procs[token]; }
         return token;
     });
@@ -1003,7 +1101,7 @@ inline void register_gl(Registry& r, Host& h) {
         q.style = c.arg(3); q.x = c.arg(4); q.y = c.arg(5); q.width = c.arg(6); q.height = c.arg(7);
         q.parent = c.arg(8) == 0xfffffffdu ? uintptr_t(int32_t(c.arg(8))) : c.arg(8) ? window(c.arg(8)) : 0; q.menu = c.arg(9); q.instance = c.arg(10);
         if ((c.arg(8) && c.arg(8) != 0xfffffffdu && !q.parent) || !q.class_name.size()) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
-        uint32_t token = map_window(h.create_window(q));
+        uint32_t token = map_window(h.create_window(q), c.mem.r32(c.fs_base + 0x24));
         if (token) { h.window_procs[token] = h.window_class_procs[q.class_name]; h.window_longs[token][-4] = h.window_procs[token]; }
         return token;
     });
@@ -1022,7 +1120,7 @@ inline void register_gl(Registry& r, Host& h) {
     r.add("user32.dll", "DestroyWindow", Conv::Stdcall, 1, [&h, count](Cpu& c) -> uint32_t {
         count("DestroyWindow"); uint32_t token = c.arg(0); auto it = h.window_handles.find(token);
         if (it == h.window_handles.end() || !h.destroy_window || !h.destroy_window(it->second)) { c.mem.w32(c.fs_base + 0x34, 6); return 0; }
-        h.window_handles.erase(it); h.window_procs.erase(token); h.window_longs.erase(token);
+        h.window_handles.erase(it); h.window_procs.erase(token); h.window_longs.erase(token); h.window_threads.erase(token);
         h.timers.erase(std::remove_if(h.timers.begin(), h.timers.end(), [token](const auto& timer) { return timer.hwnd == token; }), h.timers.end());
         return 1;
     });
