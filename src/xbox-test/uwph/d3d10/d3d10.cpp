@@ -1664,11 +1664,30 @@ struct StateBlock : d3dshim::Base, ID3D10StateBlock {
         if(mask.OMRenderTargets)device->OMGetRenderTargets(D3D10_SIMULTANEOUS_RENDER_TARGET_COUNT,renderTargets,&depthStencilView);
         if(mask.OMDepthStencilState)device->OMGetDepthStencilState(&depthStencilState,&stencilReference);
         if(mask.OMBlendState)device->OMGetBlendState(&blendState,blendFactor,&sampleMask);
-        // Each query writes the bound count back, so reset it per call and keep
-        // the result: Apply() must restore exactly that many, not all 16.
-        viewportCount=scissorRectCount=D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-        if(mask.RSViewports)device->RSGetViewports(&viewportCount,viewports);
-        if(mask.RSScissorRects)device->RSGetScissorRects(&scissorRectCount,scissorRects);
+        // Query the bound count with a null array first: D3D11 only promises
+        // the actual bound count when pViewports/pRects is null (with a
+        // non-null buffer, native D3D11 may leave the count at 16 and zero
+        // unused slots).
+        if(mask.RSViewports) {
+            viewportCount=0;
+            device->RSGetViewports(&viewportCount,nullptr);
+            if(viewportCount>D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE)
+                viewportCount=D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+            if(viewportCount) {
+                UINT n=viewportCount;
+                device->RSGetViewports(&n,viewports);
+            }
+        }
+        if(mask.RSScissorRects) {
+            scissorRectCount=0;
+            device->RSGetScissorRects(&scissorRectCount,nullptr);
+            if(scissorRectCount>D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE)
+                scissorRectCount=D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+            if(scissorRectCount) {
+                UINT n=scissorRectCount;
+                device->RSGetScissorRects(&n,scissorRects);
+            }
+        }
         if(mask.RSRasterizerState)device->RSGetState(&rasterizerState);
         if(mask.SOBuffers)device->SOGetTargets(D3D10_SO_BUFFER_SLOT_COUNT,streamOutput,streamOutputOffsets);
         if(mask.Predication)device->GetPredication(&predicate,&predicateValue);
