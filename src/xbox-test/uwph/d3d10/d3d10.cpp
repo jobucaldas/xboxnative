@@ -46,6 +46,15 @@ UINT miscFlags(UINT flags) {
     if(flags&D3D10_RESOURCE_MISC_GDI_COMPATIBLE) out|=D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
     return out;
 }
+// The same bits back again for GetDesc: the keyed-mutex and GDI flags are
+// numbered differently in the two SDKs, so a raw copy hands the guest a value
+// that is some other D3D10 flag.
+UINT d3d10MiscFlags(UINT flags) {
+    UINT out=flags&0x7;
+    if(flags&D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) out|=D3D10_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+    if(flags&D3D11_RESOURCE_MISC_GDI_COMPATIBLE) out|=D3D10_RESOURCE_MISC_GDI_COMPATIBLE;
+    return out;
+}
 D3D11_BUFFER_DESC bufferDesc(const D3D10_BUFFER_DESC& in) {
     D3D11_BUFFER_DESC out{};
     out.ByteWidth=in.ByteWidth;out.Usage=D3D11_USAGE(in.Usage);out.BindFlags=in.BindFlags;
@@ -86,7 +95,9 @@ D3D11_DEPTH_STENCIL_VIEW_DESC depthStencilViewDesc(const D3D10_DEPTH_STENCIL_VIE
     out.Format=in.Format;out.ViewDimension=D3D11_DSV_DIMENSION(in.ViewDimension);out.Flags=0;
     // The two unions start at the same offset and every member is at most the
     // 12-byte Texture2DArray form; the D3D11 union only adds members after it.
-    memcpy(&out.Texture1D,&in.Texture1D,sizeof in.Texture1D);
+    // Copy the whole union: sizeof Texture1D is 4 bytes and would drop the
+    // array slice range (ArraySize 0) of every array and MS-array view.
+    memcpy(&out.Texture1D,&in.Texture1D,sizeof in.Texture2DArray);
     return out;
 }
 // D3D10_VIEWPORT holds integer corners; D3D11_VIEWPORT holds floats.
@@ -360,7 +371,7 @@ struct Buffer : Resource<ID3D10Buffer> {
         D3D11_BUFFER_DESC got{};
         if(this->inner)static_cast<ID3D11Buffer*>(this->inner)->GetDesc(&got);
         *desc=D3D10_BUFFER_DESC{};desc->ByteWidth=got.ByteWidth;desc->Usage=D3D10_USAGE(got.Usage);
-        desc->BindFlags=got.BindFlags;desc->CPUAccessFlags=got.CPUAccessFlags;desc->MiscFlags=got.MiscFlags;
+        desc->BindFlags=got.BindFlags;desc->CPUAccessFlags=got.CPUAccessFlags;desc->MiscFlags=d3d10MiscFlags(got.MiscFlags);
     }
 };
 struct Texture1D : Resource<ID3D10Texture1D> {
@@ -382,7 +393,7 @@ struct Texture1D : Resource<ID3D10Texture1D> {
         if(this->inner)static_cast<ID3D11Texture1D*>(this->inner)->GetDesc(&got);
         *desc=D3D10_TEXTURE1D_DESC{};desc->Width=got.Width;desc->MipLevels=got.MipLevels;
         desc->ArraySize=got.ArraySize;desc->Format=got.Format;desc->Usage=D3D10_USAGE(got.Usage);
-        desc->BindFlags=got.BindFlags;desc->CPUAccessFlags=got.CPUAccessFlags;desc->MiscFlags=got.MiscFlags;
+        desc->BindFlags=got.BindFlags;desc->CPUAccessFlags=got.CPUAccessFlags;desc->MiscFlags=d3d10MiscFlags(got.MiscFlags);
     }
 };
 struct Texture2D : Resource<ID3D10Texture2D> {
@@ -405,7 +416,7 @@ struct Texture2D : Resource<ID3D10Texture2D> {
         *desc=D3D10_TEXTURE2D_DESC{};desc->Width=got.Width;desc->Height=got.Height;desc->MipLevels=got.MipLevels;
         desc->ArraySize=got.ArraySize;desc->Format=got.Format;desc->SampleDesc=got.SampleDesc;
         desc->Usage=D3D10_USAGE(got.Usage);desc->BindFlags=got.BindFlags;
-        desc->CPUAccessFlags=got.CPUAccessFlags;desc->MiscFlags=got.MiscFlags;
+        desc->CPUAccessFlags=got.CPUAccessFlags;desc->MiscFlags=d3d10MiscFlags(got.MiscFlags);
     }
 };
 struct Texture3D : Resource<ID3D10Texture3D> {
@@ -427,7 +438,7 @@ struct Texture3D : Resource<ID3D10Texture3D> {
         if(this->inner)static_cast<ID3D11Texture3D*>(this->inner)->GetDesc(&got);
         *desc=D3D10_TEXTURE3D_DESC{};desc->Width=got.Width;desc->Height=got.Height;desc->Depth=got.Depth;
         desc->MipLevels=got.MipLevels;desc->Format=got.Format;desc->Usage=D3D10_USAGE(got.Usage);
-        desc->BindFlags=got.BindFlags;desc->CPUAccessFlags=got.CPUAccessFlags;desc->MiscFlags=got.MiscFlags;
+        desc->BindFlags=got.BindFlags;desc->CPUAccessFlags=got.CPUAccessFlags;desc->MiscFlags=d3d10MiscFlags(got.MiscFlags);
     }
 };
 
@@ -516,6 +527,25 @@ struct Query : Asynchronous<ID3D10Query> {
     Query() { self=static_cast<ID3D10Query*>(this);
         D3DSHIM_IDS(&__uuidof(ID3D10Query),&__uuidof(ID3D10Asynchronous),&__uuidof(ID3D10DeviceChild)); }
     void STDMETHODCALLTYPE GetDesc(D3D10_QUERY_DESC* desc) override { if(desc)*desc=value; }
+    // D3D11's pipeline statistics add the HS/DS/CS counters after PSInvocations,
+    // and its GetData wants the whole structure; D3D10's ends at PSInvocations.
+    // Every other query's data is the same in both.
+    HRESULT STDMETHODCALLTYPE GetData(void* data,UINT size,UINT flags) override {
+        if(value.Query!=D3D10_QUERY_PIPELINE_STATISTICS||!data)
+            return Asynchronous<ID3D10Query>::GetData(data,size,flags);
+        static_assert(sizeof(D3D10_QUERY_DATA_PIPELINE_STATISTICS)<=sizeof(D3D11_QUERY_DATA_PIPELINE_STATISTICS),
+            "D3D10 statistics must be a prefix of the D3D11 ones");
+        if(size!=sizeof(D3D10_QUERY_DATA_PIPELINE_STATISTICS))return E_INVALIDARG;
+        if(!inner||!context)return E_FAIL;
+        D3D11_QUERY_DATA_PIPELINE_STATISTICS got{};
+        HRESULT hr=context->GetData(static_cast<ID3D11Asynchronous*>(inner),&got,sizeof got,flags);
+        if(hr==S_OK)memcpy(data,&got,sizeof(D3D10_QUERY_DATA_PIPELINE_STATISTICS));
+        return hr;
+    }
+    UINT STDMETHODCALLTYPE GetDataSize() override {
+        return value.Query==D3D10_QUERY_PIPELINE_STATISTICS?UINT(sizeof(D3D10_QUERY_DATA_PIPELINE_STATISTICS))
+            :Asynchronous<ID3D10Query>::GetDataSize();
+    }
     D3D10_QUERY_DESC value{};
 };
 struct Predicate : Asynchronous<ID3D10Predicate> {
@@ -532,7 +562,7 @@ namespace {
 // not create (a swapchain buffer) is wrapped on demand. The reference D3D11
 // handed out moves into the wrapper, or is dropped when one already exists.
 template<class T,class Inner,class Guest> inline void adopt(Inner* object,Guest** out) {
-    if(!out)return;
+    if(!out){if(object)object->Release();return;}
     *out=nullptr;
     if(!object)return;
     if(auto existing=d3dshim::wrap<Guest>(object)){object->Release();existing->AddRef();*out=existing;return;}
@@ -540,6 +570,20 @@ template<class T,class Inner,class Guest> inline void adopt(Inner* object,Guest*
     if(!wrapper){object->Release();return;}
     wrapper->inner=object;
     wrapper->forward=object;
+    // An object the shim did not create still lives on the shim's D3D11 device,
+    // which registered itself there: take its owner and context from it, or Map
+    // would dereference a null context and GetDevice would answer NULL.
+    ID3D11Device* host=nullptr;object->GetDevice(&host);
+    if(host) {
+        d3dshim::Base* shimDevice=nullptr;UINT size=sizeof shimDevice;
+        if(SUCCEEDED(host->GetPrivateData(d3dshim::baseId,&size,&shimDevice))&&shimDevice) {
+            wrapper->owner=static_cast<IUnknown*>(static_cast<ID3D10Device1*>(shimDevice->self));
+            wrapper->owner->AddRef();
+            host->GetImmediateContext(&wrapper->context);
+            if(wrapper->context)wrapper->context->Release();   // borrowed, as in finish()
+        }
+        host->Release();
+    }
     d3dshim::attach(object,wrapper);
     *out=static_cast<Guest*>(wrapper->self);
 }
@@ -600,6 +644,7 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         inputLayout.clear();indexBuffer.clear();depthStencilState.clear();blendState.clear();
         rasterizerState.clear();depthStencilView.clear();predicate.clear();
         vertexBuffers.clear();renderTargets.clear();streamOutput.clear();
+        if(device())device()->SetPrivateData(d3dshim::baseId,0,nullptr);   // see adopt()
         host.destroy();
     }
     ID3D11Device* device() const { return host.device; }
@@ -782,6 +827,14 @@ struct Device : d3dshim::Base, ID3D10Device1 {
                 topMip=srv.Texture2DArray.MostDetailedMip;mipCount=srv.Texture2DArray.MipLevels;
                 firstSlice=srv.Texture2DArray.FirstArraySlice;sliceCount=srv.Texture2DArray.ArraySize;
             }
+            // A cube view covers six faces of the mip range it names; without
+            // this the whole chain was rewritten, including mips the view excludes.
+            else if(srv.ViewDimension==D3D11_SRV_DIMENSION_TEXTURECUBE) {
+                topMip=srv.TextureCube.MostDetailedMip;mipCount=srv.TextureCube.MipLevels;sliceCount=6;
+            } else if(srv.ViewDimension==D3D11_SRV_DIMENSION_TEXTURECUBEARRAY) {
+                topMip=srv.TextureCubeArray.MostDetailedMip;mipCount=srv.TextureCubeArray.MipLevels;
+                firstSlice=srv.TextureCubeArray.First2DArrayFace;sliceCount=srv.TextureCubeArray.NumCubes*6;
+            }
             ID3D11Resource* resource=nullptr;inner->GetResource(&resource);
             generateMipsRgba8(device(),context(),resource,topMip,mipCount,firstSlice,sliceCount);
             if(resource)resource->Release();
@@ -883,8 +936,10 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         ID3D11DepthStencilView* dsv=nullptr;
         UINT n=count>8?8:count;
         context()->OMGetRenderTargets(n,got,&dsv);
-        for(UINT i=0;i<n;++i)adopt(got[i],&out[i]);
-        if(depth)adopt(dsv,depth);
+        for(UINT i=0;i<n;++i)adopt(got[i],out?&out[i]:nullptr);
+        // D3D11 hands out a reference on the depth view whether or not the guest
+        // asked for it; a NULL depth pointer must not keep it.
+        adopt(dsv,depth);
     }
     void STDMETHODCALLTYPE OMGetBlendState(ID3D10BlendState** out,FLOAT factor[4],UINT* mask) override {
         ID3D11BlendState* got=nullptr;context()->OMGetBlendState(&got,factor,mask);adopt(got,out);
@@ -1006,6 +1061,10 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         auto wrapper=d3dshim::create<ShaderResourceView>();
         if(!wrapper){object->Release();return E_OUTOFMEMORY;}
         if(desc)wrapper->value=*desc;
+        else {   // GetDesc answers the resolved default, not zeros
+            D3D11_SHADER_RESOURCE_VIEW_DESC got{};object->GetDesc(&got);
+            wrapper->value=prefix<D3D10_SHADER_RESOURCE_VIEW_DESC1>(got);
+        }
         return finish<ShaderResourceView>(object,out,hr,wrapper);
     }
     HRESULT STDMETHODCALLTYPE CreateRenderTargetView(ID3D10Resource* resource,const D3D10_RENDER_TARGET_VIEW_DESC* desc,ID3D10RenderTargetView** out) override {
@@ -1021,6 +1080,10 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         auto wrapper=d3dshim::create<RenderTargetView>();
         if(!wrapper){object->Release();return E_OUTOFMEMORY;}
         if(desc)wrapper->value=*desc;
+        else {
+            D3D11_RENDER_TARGET_VIEW_DESC got{};object->GetDesc(&got);
+            wrapper->value=prefix<D3D10_RENDER_TARGET_VIEW_DESC>(got);
+        }
         return finish<RenderTargetView>(object,out,hr,wrapper);
     }
     HRESULT STDMETHODCALLTYPE CreateDepthStencilView(ID3D10Resource* resource,const D3D10_DEPTH_STENCIL_VIEW_DESC* desc,ID3D10DepthStencilView** out) override {
@@ -1036,6 +1099,11 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         auto wrapper=d3dshim::create<DepthStencilView>();
         if(!wrapper){object->Release();return E_OUTOFMEMORY;}
         if(desc)wrapper->value=*desc;
+        else {   // D3D11's descriptor has the extra Flags word, so convert member-wise
+            D3D11_DEPTH_STENCIL_VIEW_DESC got{};object->GetDesc(&got);
+            wrapper->value.Format=got.Format;wrapper->value.ViewDimension=D3D10_DSV_DIMENSION(got.ViewDimension);
+            memcpy(&wrapper->value.Texture1D,&got.Texture1D,sizeof wrapper->value.Texture2DArray);
+        }
         return finish<DepthStencilView>(object,out,hr,wrapper);
     }
     HRESULT STDMETHODCALLTYPE CreateInputLayout(const D3D10_INPUT_ELEMENT_DESC* elements,UINT count,
@@ -1087,7 +1155,7 @@ struct Device : d3dshim::Base, ID3D10Device1 {
         // stride array D3D11 wants has a single element. Wine's rule: a stride
         // with no declarations, or any entry on another output slot, is invalid.
         if(!count&&stride)return E_INVALIDARG;
-        if(count>32)return E_INVALIDARG;
+        if(count>32||(count&&!declarations))return E_INVALIDARG;
         D3D11_SO_DECLARATION_ENTRY converted[32]{};
         UINT strideCount=1;
         for(UINT i=0;i<count;++i) {
@@ -1299,6 +1367,9 @@ HRESULT createDevice(IDXGIAdapter* adapter,D3D10_DRIVER_TYPE type,UINT flags,
     HRESULT hr=device->host.create(adapter,adapter?D3D_DRIVER_TYPE_UNKNOWN:driverType(type),levels,1,createFlags(flags));
     if(FAILED(hr)){d3dshim::destroy(device);return hr;}
     device->creationFlags=flags;
+    // Wrappers made later for objects the shim did not create find their device
+    // through this (see adopt).
+    {d3dshim::Base* base=device;device->host.device->SetPrivateData(d3dshim::baseId,sizeof base,&base);}
     *out=device;
     if(concrete)*concrete=device;
     return S_OK;
@@ -1594,6 +1665,7 @@ struct StateBlock : d3dshim::Base, ID3D10StateBlock {
         if(mask.OMDepthStencilState)device->OMGetDepthStencilState(&depthStencilState,&stencilReference);
         if(mask.OMBlendState)device->OMGetBlendState(&blendState,blendFactor,&sampleMask);
         if(mask.RSViewports)device->RSGetViewports(&count,viewports);
+        count=D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;   // the call above wrote the bound count back
         if(mask.RSScissorRects)device->RSGetScissorRects(&count,scissorRects);
         if(mask.RSRasterizerState)device->RSGetState(&rasterizerState);
         if(mask.SOBuffers)device->SOGetTargets(D3D10_SO_BUFFER_SLOT_COUNT,streamOutput,streamOutputOffsets);
@@ -1728,9 +1800,10 @@ extern "C" {
 __declspec(dllexport) HRESULT WINAPI D3D10CreateDevice(IDXGIAdapter* adapter,D3D10_DRIVER_TYPE type,
         HMODULE swrast,UINT flags,UINT sdk,ID3D10Device** out) {
     (void)swrast;
+    if(!out)return E_POINTER;
     ID3D10Device1* device=nullptr;
     HRESULT hr=createDevice(adapter,type,flags,D3D10_FEATURE_LEVEL_10_0,sdk,D3D10_SDK_VERSION,&device);
-    if(FAILED(hr))return hr;
+    if(FAILED(hr)){*out=nullptr;return hr;}
     *out=static_cast<ID3D10Device*>(device);
     return S_OK;
 }
@@ -1767,9 +1840,12 @@ __declspec(dllexport) HRESULT WINAPI D3D10CompileShader(const char* data,SIZE_T 
     using Fn=pD3DCompile;
     auto fn=(Fn)compiler.proc("D3DCompile");
     if(!fn)return E_FAIL;
+    if(shader)*shader=nullptr;
     ID3DBlob* code=nullptr;ID3DBlob* messages=nullptr;
     HRESULT hr=fn(data,size,filename,defines,include,entrypoint,profile,flags,0,&code,&messages);
-    if(shader)hr=FAILED(hr)?(messages?messages->Release():S_OK,hr):blob(code,shader);
+    // The messages blob belongs to the errors block below; releasing it here
+    // freed what the guest was then handed.
+    if(shader&&SUCCEEDED(hr))hr=blob(code,shader);
     else if(code)code->Release();
     if(errors) {
         if(messages)blob(messages,errors);
